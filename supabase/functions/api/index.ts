@@ -23,7 +23,45 @@ const CORS = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 };
 
-const PROVIDERS = ["openai", "anthropic", "gemini", "groq", "openrouter", "elevenlabs"];
+const PROVIDERS = ["openai", "anthropic", "gemini", "groq", "openrouter", "elevenlabs", "sarvam"];
+
+// ---------- language handling ----------
+
+const LANG_RULES: Record<string, string> = {
+  en: "Always reply in English.",
+  hi: "Always reply in Hindi, written in Devanagari script.",
+  hinglish: [
+    "Reply in Hinglish: casual Hindi mixed with English, the way people talk in India.",
+    "Format your reply as exactly two lines and nothing else:",
+    "DISPLAY: the reply written fully in Roman (Latin) script, e.g. Haan, Delhi India ki capital hai.",
+    "SPEECH: the same reply with Hindi words in Devanagari and English words in Latin script, e.g. हाँ, Delhi India की capital है।",
+  ].join("\n"),
+  auto: "Reply in the same language the user spoke. Write Hindi in Devanagari script.",
+};
+
+function systemPrompt(s: any): string {
+  return `${s.system_prompt}\n\n${LANG_RULES[s.language] ?? ""}`.trim();
+}
+
+// Hinglish replies carry a Roman version for the screen and a mixed-script version for the voice
+function splitReply(raw: string, language: string): { display: string; speech: string } {
+  if (language !== "hinglish") return { display: raw, speech: raw };
+  const d = raw.match(/DISPLAY:\s*([\s\S]*?)(?:\n\s*SPEECH:|$)/i);
+  const sp = raw.match(/SPEECH:\s*([\s\S]*)$/i);
+  const display = (d?.[1] ?? raw.replace(/SPEECH:[\s\S]*$/i, "")).trim();
+  return { display, speech: (sp?.[1] ?? display).trim() };
+}
+
+// The box's built-in font only has basic Latin: swap typographic characters for plain ones
+function plainPunct(t: string): string {
+  return t.replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/[–—]/g, "-")
+    .replace(/…/g, "...").replace(/₹/g, "Rs ").replace(/ /g, " ");
+}
+
+// Text the box's own font can't draw (it only has ASCII)
+function needsRender(...texts: (string | null | undefined)[]): boolean {
+  return texts.some((t) => t && /[^\u0000-\u007F]/.test(plainPunct(t)));
+}
 
 class HttpError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -162,16 +200,23 @@ async function deviceAsk(req: Request) {
       : [];
     const messages: Msg[] = [];
     for (const h of hist.reverse()) {
-      messages.push({ role: "user", content: h.question }, { role: "assistant", content: h.answer });
+      const prev = s.language === "hinglish" ? `DISPLAY: ${h.answer}` : h.answer;
+      messages.push({ role: "user", content: h.question }, { role: "assistant", content: prev });
     }
     messages.push({ role: "user", content: question });
 
-    const answer = await chat(s.llm_provider, s.llm_model, await providerKey(s.llm_provider), s.system_prompt, messages);
+    const raw = await chat(s.llm_provider, s.llm_model, await providerKey(s.llm_provider), systemPrompt(s), messages);
+    const { display, speech } = splitReply(raw, s.language);
     await db.from("conversations").insert({
-      device_id: dev.id, question, answer, llm_provider: s.llm_provider, llm_model: s.llm_model,
+      device_id: dev.id, question, answer: display, llm_provider: s.llm_provider, llm_model: s.llm_model,
       latency_ms: Date.now() - t0,
     });
-    return json({ question, answer });
+    const render = needsRender(question, display);
+    return json({
+      question: render ? question : plainPunct(question), answer: render ? display : plainPunct(display),
+      speech: speech !== display ? speech : undefined,
+      render,
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     await db.from("conversations").insert({
@@ -184,10 +229,23 @@ async function deviceAsk(req: Request) {
 
 async function ttsResponse(text: string) {
   const s = await getSettings();
-  const audio = await speak(s.tts_provider, s.tts_model, s.tts_voice, await providerKey(s.tts_provider), text.slice(0, 1500));
+  const audio = await speak(s.tts_provider, s.tts_model, s.tts_voice, await providerKey(s.tts_provider), text.slice(0, 1500), s.language);
   return new Response(audio, {
     headers: { ...CORS, "Content-Type": "application/octet-stream", "X-Sample-Rate": String(TTS_SAMPLE_RATE) },
   });
+}
+
+// Draws question + answer as an RGB565 bitmap for scripts the box can't shape itself
+async function deviceRender(req: Request) {
+  await deviceAuth(req);
+  const b = await req.json();
+  const width = Math.min(Math.max(Number(b.width) || 300, 100), 320);
+  const { renderBlocks } = await import("./render.ts");
+  const out = await renderBlocks([
+    { text: b.question ? `You: ${b.question}` : "", size: 14, color: "#9aa3b2" },
+    { text: String(b.answer ?? ""), size: 17, color: "#e8eaf0" },
+  ], width);
+  return new Response(out, { headers: { ...CORS, "Content-Type": "application/octet-stream" } });
 }
 
 async function deviceTts(req: Request) {
@@ -297,9 +355,10 @@ async function admin(path: string, req: Request) {
     case "/admin/test": {
       const s = await getSettings();
       const t0 = Date.now();
-      const answer = await chat(s.llm_provider, s.llm_model, await providerKey(s.llm_provider), s.system_prompt,
+      const raw = await chat(s.llm_provider, s.llm_model, await providerKey(s.llm_provider), systemPrompt(s),
         [{ role: "user", content: String(body.text || "Say hello in one sentence.") }]);
-      return json({ answer, ms: Date.now() - t0 });
+      const { display, speech } = splitReply(raw, s.language);
+      return json({ answer: display, speech, ms: Date.now() - t0 });
     }
     case "/admin/tts": {
       return await ttsResponse(String(body.text || "Hello, I am your ESP box assistant."));
@@ -386,6 +445,7 @@ Deno.serve(async (req) => {
     if (path === "/device/hello") return await deviceHello(req);
     if (path === "/device/ask") return await deviceAsk(req);
     if (path === "/device/tts") return await deviceTts(req);
+    if (path === "/device/render") return await deviceRender(req);
     if (path.startsWith("/admin/")) return await admin(path, req);
     if (path.startsWith("/ci/")) return await ci(path, req);
     if (path === "/health") return json({ ok: true });
