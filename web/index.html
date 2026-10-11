@@ -120,7 +120,7 @@ esp-web-install-button button{all:unset}
           <div><label>Remember last N exchanges (within 10 min)</label><input type="number" id="max_history" min="0" max="20"></div>
           <div><label>Language</label>
             <select id="language">
-              <option value="en">English</option><option value="hi">Hindi</option><option value="auto">Auto detect</option>
+              <option value="en">English</option><option value="hinglish">Hinglish</option><option value="hi">Hindi (Devanagari)</option><option value="auto">Auto (match the speaker)</option>
             </select></div>
         </div>
       </div>
@@ -224,12 +224,14 @@ const LLM = {
   gemini:     { label: "Google Gemini", models: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"] },
   groq:       { label: "Groq",          models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"] },
   openrouter: { label: "OpenRouter",    models: ["openai/gpt-4o-mini", "anthropic/claude-haiku-4.5", "google/gemini-2.5-flash"] },
+  sarvam:     { label: "Sarvam AI",     models: ["sarvam-105b-conversations", "sarvam-105b"] },
 };
 const STT = {
   openai:     { label: "OpenAI",     models: ["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "whisper-1"] },
   groq:       { label: "Groq",       models: ["whisper-large-v3-turbo", "whisper-large-v3"] },
   elevenlabs: { label: "ElevenLabs", models: ["scribe_v1"] },
   gemini:     { label: "Google Gemini", models: ["gemini-2.5-flash"] },
+  sarvam:     { label: "Sarvam AI",  models: ["saaras:v3", "saaras:v4"] },
 };
 const TTS = {
   openai:     { label: "OpenAI", models: ["gpt-4o-mini-tts", "tts-1"],
@@ -238,10 +240,14 @@ const TTS = {
                 voices: ["21m00Tcm4TlvDq8ikWAM"], hint: "(voice ID from your ElevenLabs library)" },
   gemini:     { label: "Google Gemini", models: ["gemini-2.5-flash-preview-tts"],
                 voices: ["Kore","Puck","Charon","Aoede","Fenrir","Leda"], hint: "" },
+  sarvam:     { label: "Sarvam AI", models: ["bulbul:v3", "bulbul:v4-flash", "bulbul:v2"],
+                voices: ["shubh","priya","ritu","neha","rahul","aditya","pooja","rohan","simran","kavya","amit","ishita","shreya","kabir","tanya",
+                         "shubh_enhi_ads","ishita_enhi_customer","simran_en_customer","shubh_hi_devotional","ritu_hi_kids"],
+                hint: "(bulbul:v3 uses names like shubh or priya; bulbul:v4-flash uses persona IDs like shubh_enhi_ads)" },
 };
 const KEY_PROVIDERS = {
   openai: "OpenAI", anthropic: "Anthropic", gemini: "Google Gemini", groq: "Groq",
-  openrouter: "OpenRouter", elevenlabs: "ElevenLabs",
+  openrouter: "OpenRouter", elevenlabs: "ElevenLabs", sarvam: "Sarvam AI",
 };
 const TABS = [["boxes","Boxes"],["ai","AI"],["keys","API keys"],["wifi","Wi-Fi"],["updates","Updates"],["history","History"],["account","Account"]];
 
@@ -455,17 +461,19 @@ $("saveAi").onclick = (e) => withBtn(e.target, async () => {
   toast("Saved"); await refresh();
 });
 
+let lastSpeech = "";
 $("testBtn").onclick = (e) => withBtn(e.target, async () => {
   $("testOut").textContent = "Thinking...";
   try {
     const r = await call("/admin/test", { text: $("testQ").value });
+    lastSpeech = r.speech || r.answer;
     $("testOut").innerHTML = `${esc(r.answer)} <span class="muted">(${(r.ms / 1000).toFixed(1)} s)</span>`;
   } catch (err) { $("testOut").innerHTML = `<span class="err">${esc(err.message)}</span>`; }
 });
 
 let actx;
 $("voiceBtn").onclick = (e) => withBtn(e.target, async () => {
-  const text = ($("testOut").innerText.replace(/\(\d+\.\d s\)$/, "").trim()) || "Hello, I am your ESP box assistant.";
+  const text = lastSpeech || "Hello, I am your ESP box assistant.";
   const res = await call("/admin/tts", { text }, true);
   const rate = Number(res.headers.get("X-Sample-Rate") || 24000);
   const raw = await res.arrayBuffer();
