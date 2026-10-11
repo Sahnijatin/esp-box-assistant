@@ -13,6 +13,7 @@
 #include "wifi_mgr.h"
 #include "cloud.h"
 #include "assistant.h"
+#include "improv.h"
 
 static const char *TAG = "main";
 
@@ -26,6 +27,7 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+    improv_start();   // first, so the web installer finds it right after flashing
 
     const char *ver = esp_app_get_description()->version;
     ESP_LOGI(TAG, "ESP Box Assistant v%s", ver);

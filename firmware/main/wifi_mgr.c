@@ -36,6 +36,7 @@ static bool ap_active, setup_manual, rescan_req, connecting;
 static char pending_ssid[33], pending_pass[65];
 static bool pending;
 static char cur_ssid[33];
+static volatile bool ready;
 
 #define SCAN_MAX 20
 static wifi_ap_record_t scan_recs[SCAN_MAX];
@@ -348,7 +349,10 @@ void wifi_mgr_init(void)
     esp_wifi_set_ps(WIFI_PS_NONE);
 
     xTaskCreate(wifi_task, "wifi_mgr", 6144, NULL, 5, NULL);
+    ready = true;
 }
+
+bool wifi_mgr_ready(void) { return ready; }
 
 bool wifi_mgr_connected(void)
 {
