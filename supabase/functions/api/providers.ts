@@ -33,14 +33,27 @@ const OPENAI_COMPAT: Record<string, string> = {
   openai: "https://api.openai.com/v1",
   groq: "https://api.groq.com/openai/v1",
   openrouter: "https://openrouter.ai/api/v1",
+  sarvam: "https://api.sarvam.ai/v1",
 };
+
+// Setting value -> provider language codes
+// en: English, hi: Hindi (Devanagari), hinglish: Hindi-English mix, auto: detect
+function isoLang(language: string): string {
+  return language === "en" ? "en" : language === "hi" || language === "hinglish" ? "hi" : "";
+}
+function sarvamLang(language: string, text = ""): string {
+  if (language === "en") return "en-IN";
+  if (language === "hi" || language === "hinglish") return "hi-IN";
+  if (text) return /[ऀ-ॿ]/.test(text) ? "hi-IN" : "en-IN";
+  return "unknown";
+}
 
 // ---------------- speech to text ----------------
 
 export async function transcribe(
   provider: string, model: string, key: string, wav: Uint8Array<ArrayBuffer>, language: string,
 ): Promise<string> {
-  const lang = language && language !== "auto" ? language : "";
+  const lang = isoLang(language);
   if (provider === "openai" || provider === "groq") {
     const form = new FormData();
     form.append("file", new Blob([wav], { type: "audio/wav" }), "audio.wav");
@@ -60,6 +73,17 @@ export async function transcribe(
       method: "POST", headers: { "xi-api-key": key }, body: form,
     });
     return ((await res.json()).text ?? "").trim();
+  }
+  if (provider === "sarvam") {
+    const form = new FormData();
+    form.append("file", new Blob([wav], { type: "audio/wav" }), "audio.wav");
+    form.append("model", model || "saaras:v3");
+    form.append("language_code", sarvamLang(language));
+    if ((model || "saaras:v3") === "saaras:v3") form.append("mode", language === "hinglish" ? "codemix" : "transcribe");
+    const res = await call("https://api.sarvam.ai/speech-to-text", {
+      method: "POST", headers: { "api-subscription-key": key }, body: form,
+    });
+    return ((await res.json()).transcript ?? "").trim();
   }
   if (provider === "gemini") {
     const res = await call(
@@ -98,11 +122,15 @@ export async function chat(
       messages: [{ role: "system", content: system }, ...messages],
     };
     if (provider === "openai") body.max_completion_tokens = 600;
-    else body.max_tokens = 400;
+    else if (provider === "sarvam") {
+      body.max_tokens = 1500;          // reasoning tokens count against this
+      body.reasoning_effort = "low";
+    } else body.max_tokens = 400;
     const headers: Record<string, string> = {
       Authorization: `Bearer ${key}`, "Content-Type": "application/json",
     };
     if (provider === "openrouter") headers["X-Title"] = "ESP Box Assistant";
+    if (provider === "sarvam") headers["api-subscription-key"] = key;
     const res = await call(`${OPENAI_COMPAT[provider]}/chat/completions`, {
       method: "POST", headers, body: JSON.stringify(body),
     });
@@ -148,9 +176,45 @@ export async function chat(
 
 export const TTS_SAMPLE_RATE = 24000;
 
+// Strips a WAV header if present, returning the raw PCM samples
+function wavToPcm(b: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+  if (b.length < 44 || String.fromCharCode(...b.subarray(0, 4)) !== "RIFF") return b;
+  let p = 12;
+  while (p + 8 <= b.length) {
+    const id = String.fromCharCode(...b.subarray(p, p + 4));
+    const len = b[p + 4] | (b[p + 5] << 8) | (b[p + 6] << 16) | (b[p + 7] << 24);
+    if (id === "data") return b.slice(p + 8, Math.min(b.length, p + 8 + len));
+    p += 8 + len + (len & 1);
+  }
+  return b.slice(44);
+}
+
 export async function speak(
-  provider: string, model: string, voice: string, key: string, text: string,
+  provider: string, model: string, voice: string, key: string, text: string, language = "en",
 ): Promise<ReadableStream<Uint8Array> | Uint8Array<ArrayBuffer>> {
+  if (provider === "sarvam") {
+    const m = model || "bulbul:v3";
+    const body: Record<string, unknown> = {
+      text: text.slice(0, m === "bulbul:v2" ? 1500 : 2500),
+      language_code: sarvamLang(language === "auto" ? "" : language, text),
+      model: m,
+      speech_sample_rate: TTS_SAMPLE_RATE,
+      output_audio_codec: "wav",
+    };
+    if (voice) body.speaker = voice;
+    const res = await call("https://api.sarvam.ai/text-to-speech", {
+      method: "POST",
+      headers: { "api-subscription-key": key, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const j = await res.json();
+    const parts: Uint8Array<ArrayBuffer>[] = (j.audios ?? []).map((a: string) => wavToPcm(unb64(a)));
+    if (!parts.length) throw new Error("Sarvam TTS returned no audio");
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let o = 0;
+    for (const p of parts) { out.set(p, o); o += p.length; }
+    return out;
+  }
   if (provider === "openai") {
     const res = await call("https://api.openai.com/v1/audio/speech", {
       method: "POST",
