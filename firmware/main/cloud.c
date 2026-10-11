@@ -3,6 +3,9 @@
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "freertos/stream_buffer.h"
+#include "freertos/idf_additions.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
@@ -241,6 +244,50 @@ bool cloud_render(const char *question, const char *answer, uint8_t **rgb565, in
     return ok;
 }
 
+// Network and speaker run in separate tasks with a jitter buffer between them, so a
+// slow patch on Wi-Fi doesn't turn into gaps in the voice.
+#define TTS_BUF_BYTES   (256 * 1024)              // ~5.5 s of 24 kHz 16-bit audio, in PSRAM
+#define TTS_PREBUFFER   (TTS_SAMPLE_RATE * 2 / 2) // 0.5 s buffered before playback starts
+#define TTS_CHUNK       4096
+
+typedef struct {
+    StreamBufferHandle_t sb;
+    volatile bool done;          // network side finished (or gave up)
+    volatile bool *stop;
+    SemaphoreHandle_t finished;
+} player_t;
+
+static void player_task(void *arg)
+{
+    player_t *p = arg;
+    uint8_t *buf = heap_caps_malloc(TTS_CHUNK, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    while (buf && !p->done && !(p->stop && *p->stop) &&
+           xStreamBufferBytesAvailable(p->sb) < TTS_PREBUFFER) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (buf) {
+        int carry = -1;          // odd byte left from the previous chunk
+        audio_play_begin(TTS_SAMPLE_RATE);
+        for (;;) {
+            if (p->stop && *p->stop) break;
+            int off = 0;
+            if (carry >= 0) { buf[0] = (uint8_t)carry; off = 1; carry = -1; }
+            int n = off + (int)xStreamBufferReceive(p->sb, buf + off, TTS_CHUNK - off, pdMS_TO_TICKS(50));
+            if (n == off) {
+                if (p->done && xStreamBufferIsEmpty(p->sb)) break;
+                if (off) carry = buf[0];
+                continue;
+            }
+            if (n & 1) carry = buf[--n];
+            audio_play_write(buf, n);
+        }
+        audio_play_end();
+        free(buf);
+    }
+    xSemaphoreGive(p->finished);
+    vTaskDelete(NULL);
+}
+
 bool cloud_speak(const char *text, volatile bool *stop)
 {
     cJSON *j = cJSON_CreateObject();
@@ -255,29 +302,38 @@ bool cloud_speak(const char *text, volatile bool *stop)
     if (esp_http_client_open(c, blen) == ESP_OK && write_all(c, (uint8_t *)body, blen)) {
         esp_http_client_fetch_headers(c);
         int status = esp_http_client_get_status_code(c);
-        uint8_t *buf = status == 200 ? heap_caps_malloc(4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) : NULL;
-        if (buf) {
-            int carry = -1;    // odd byte left from the previous chunk
-            audio_play_begin(TTS_SAMPLE_RATE);
+        player_t p = { .stop = stop };
+        uint8_t *buf = NULL;
+        if (status == 200) {
+            p.sb = xStreamBufferCreateWithCaps(TTS_BUF_BYTES, 1, MALLOC_CAP_SPIRAM);
+            p.finished = xSemaphoreCreateBinary();
+            buf = heap_caps_malloc(TTS_CHUNK, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        }
+        if (p.sb && p.finished && buf &&
+            xTaskCreatePinnedToCore(player_task, "tts_play", 4096, &p, 7, NULL, 1) == pdPASS) {
             for (;;) {
                 if (stop && *stop) break;
-                int off = 0;
-                if (carry >= 0) { buf[0] = (uint8_t)carry; off = 1; carry = -1; }
-                int n = esp_http_client_read(c, (char *)buf + off, 4096 - off);
+                int n = esp_http_client_read(c, (char *)buf, TTS_CHUNK);
                 if (n <= 0) break;
-                n += off;
-                if (n & 1) carry = buf[--n];
-                audio_play_write(buf, n);
+                // Wait for room in the buffer, but give up if the player was stopped
+                for (int sent = 0; sent < n && !(stop && *stop);) {
+                    sent += xStreamBufferSend(p.sb, buf + sent, n - sent, pdMS_TO_TICKS(100));
+                }
             }
-            audio_play_end();
-            free(buf);
+            p.done = true;
+            xSemaphoreTake(p.finished, portMAX_DELAY);
             ok = true;
         } else if (status != 200) {
             resp_t r;
             read_body(c, &r);
             ESP_LOGW(TAG, "tts failed %d: %s", status, r.body);
             free(r.body);
+        } else {
+            ESP_LOGE(TAG, "tts: out of memory");
         }
+        free(buf);
+        if (p.sb) vStreamBufferDeleteWithCaps(p.sb);
+        if (p.finished) vSemaphoreDelete(p.finished);
     }
     esp_http_client_close(c);
     esp_http_client_cleanup(c);

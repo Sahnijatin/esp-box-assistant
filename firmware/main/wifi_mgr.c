@@ -345,7 +345,8 @@ void wifi_mgr_init(void)
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
-    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    // The box is mains powered: power save makes audio streaming slow and choppy
+    esp_wifi_set_ps(WIFI_PS_NONE);
 
     xTaskCreate(wifi_task, "wifi_mgr", 6144, NULL, 5, NULL);
     ready = true;

@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
     paths: ["firmware/**", ".github/workflows/firmware.yml", ".github/scripts/**"]
+  pull_request:     # compile check only; nothing is published from a PR
+    paths: ["firmware/**", ".github/workflows/firmware.yml", ".github/scripts/**"]
   workflow_dispatch:
 
 permissions:
@@ -11,8 +13,8 @@ permissions:
   id-token: write   # GitHub OIDC token proves to the backend that this repo is publishing
 
 concurrency:
-  group: firmware
-  cancel-in-progress: false
+  group: firmware-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   API: https://sxzeggllkdirvfnravfe.supabase.co/functions/v1/api
@@ -42,6 +44,7 @@ jobs:
           python -m esptool --chip esp32s3 merge_bin -o factory.bin @flash_args
 
       - name: Publish to backend
+        if: github.event_name != 'pull_request'
         shell: bash
         run: |
           python3 .github/scripts/publish.py release \
@@ -52,7 +55,7 @@ jobs:
             --notes "$(git log -1 --pretty=%s 2>/dev/null || echo '')"
 
       - name: Report failure
-        if: failure()
+        if: failure() && github.event_name != 'pull_request'
         shell: bash
         run: |
           python3 .github/scripts/publish.py log --version "$VERSION" --status failure --log build.log || true
