@@ -13,6 +13,7 @@
 #define WIFI_MAX_NETS 12
 
 void wifi_mgr_init(void);
+bool wifi_mgr_ready(void);          // true once wifi_mgr_init() has finished
 bool wifi_mgr_connected(void);
 bool wifi_mgr_wait_connected(int timeout_ms);
 void wifi_mgr_info(char *ssid, size_t ssid_len, char *ip, size_t ip_len, int *rssi);

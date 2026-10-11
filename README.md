@@ -17,7 +17,7 @@ Tap-to-talk AI Q&A on the ESP32-S3-BOX-3, fully managed over the internet: AI pr
 
 | Path | What |
 |---|---|
-| `firmware/` | ESP-IDF 5.4 app: LVGL 9 UI, Wi-Fi manager, audio, OTA with rollback |
+| `firmware/` | ESP-IDF 5.4 app: LVGL 9 UI, Wi-Fi manager, Improv Wi-Fi over USB, audio, OTA with rollback |
 | `supabase/functions/api/index.ts` | Edge Function router: `/device/*`, `/admin/*`, `/ci/*` |
 | `supabase/functions/api/providers.ts` | Speech-to-text, chat and text-to-speech adapters for every provider |
 | `supabase/functions/api/render.ts` | Draws Hindi (and other non-ASCII) text as an RGB565 bitmap for the box |
@@ -46,7 +46,8 @@ Edge Function changes are deployed separately (Supabase dashboard, CLI `supabase
 
 ## Box behaviour
 
-- **First boot:** no Wi-Fi saved → Wi-Fi screen on the touchscreen + hotspot `ESP-Box-XXXX` (open `http://192.168.4.1`).
+- **First install:** the web installer asks for Wi-Fi right after flashing and sends it to the box over USB ([Improv Wi-Fi](https://www.improv-wifi.com/serial/)), then links to the setup page to pair.
+- **First boot without Wi-Fi:** Wi-Fi screen on the touchscreen + hotspot `ESP-Box-XXXX` (open `http://192.168.4.1`).
 - **Pairing:** shows a 6-digit code; enter it on the setup page under Boxes.
 - **Reflashed / erased box:** it makes a new device token, and the server won't accept it for a box that's already paired (so nobody can take over a box by copying its ID). The box says "Box was reset", the setup page flags it; remove the box there and it shows a new pairing code.
 - **Failed update:** the box tries a build up to 3 times; a build that keeps failing or gets rolled back is skipped until the next build, or until you press Retry update on the setup page.
