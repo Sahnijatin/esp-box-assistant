@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Box Control</title>
+<meta name="robots" content="noindex">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='4' width='24' height='24' rx='6' fill='%233b82f6'/%3E%3Ccircle cx='16' cy='15' r='5' fill='white'/%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#f6f7f9; --card:#ffffff; --text:#111318; --muted:#5f6878; --line:#e3e6eb;
+  --accent:#2563eb; --accent-ink:#fff; --ok:#059669; --warn:#b45309; --bad:#dc2626;
+  --field:#f1f3f6; --shadow:0 1px 2px rgba(0,0,0,.05);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0f1115; --card:#171a21; --text:#e8eaf0; --muted:#9aa3b2; --line:#262b35;
+    --accent:#3b82f6; --ok:#10b981; --warn:#f59e0b; --bad:#ef4444; --field:#1f232c; --shadow:none;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0f1115; --card:#171a21; --text:#e8eaf0; --muted:#9aa3b2; --line:#262b35;
+  --accent:#3b82f6; --ok:#10b981; --warn:#f59e0b; --bad:#ef4444; --field:#1f232c; --shadow:none;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+button,input,select,textarea{font:inherit;color:inherit}
+.wrap{max-width:760px;margin:0 auto;padding:16px 16px 80px}
+header{display:flex;align-items:center;gap:10px;padding:8px 0 14px}
+header h1{font-size:18px;margin:0;flex:1}
+.logo{width:28px;height:28px;border-radius:8px;background:var(--accent);display:grid;place-items:center}
+.logo i{width:10px;height:10px;border-radius:50%;background:#fff;display:block}
+nav{display:flex;gap:6px;overflow-x:auto;padding-bottom:12px;scrollbar-width:none}
+nav button{border:1px solid var(--line);background:var(--card);padding:8px 14px;border-radius:999px;white-space:nowrap;cursor:pointer}
+nav button.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:var(--shadow)}
+.card h2{font-size:15px;margin:0 0 4px}
+.card p.sub{margin:0 0 12px;color:var(--muted);font-size:13px}
+label{display:block;font-size:13px;color:var(--muted);margin:12px 0 5px}
+input[type=text],input[type=password],input[type=number],select,textarea{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--field);outline:none}
+input:focus,select:focus,textarea:focus{border-color:var(--accent)}
+textarea{min-height:92px;resize:vertical}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media (max-width:520px){.row{grid-template-columns:1fr}}
+.btn{border:0;background:var(--accent);color:var(--accent-ink);padding:10px 16px;border-radius:10px;cursor:pointer;font-weight:600}
+.btn.ghost{background:transparent;color:var(--text);border:1px solid var(--line);font-weight:500}
+.btn.danger{background:transparent;color:var(--bad);border:1px solid var(--line);font-weight:500}
+.btn.sm{padding:6px 10px;font-size:13px}
+.btn:disabled{opacity:.5;cursor:default}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;align-items:center}
+.list{display:flex;flex-direction:column}
+.item{display:flex;gap:12px;align-items:flex-start;padding:12px 0;border-top:1px solid var(--line)}
+.item:first-child{border-top:0}
+.item .grow{flex:1;min-width:0}
+.item .t{font-weight:600}
+.item .m{color:var(--muted);font-size:13px;overflow-wrap:anywhere}
+.dot{width:9px;height:9px;border-radius:50%;margin-top:7px;flex:none;background:var(--muted)}
+.dot.on{background:var(--ok)}.dot.wait{background:var(--warn)}.dot.off{background:var(--bad)}
+.pill{display:inline-block;font-size:12px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+.pill.ok{color:var(--ok);border-color:currentColor}.pill.bad{color:var(--bad);border-color:currentColor}.pill.warn{color:var(--warn);border-color:currentColor}
+.code-in{font-size:28px;letter-spacing:8px;text-align:center;font-variant-numeric:tabular-nums}
+.toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:10px 16px;border-radius:10px;max-width:90vw;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9}
+.toast.show{opacity:1}
+.empty{color:var(--muted);font-size:14px;padding:6px 0}
+.q{color:var(--muted);font-size:13px}
+.a{margin-top:2px}
+.err{color:var(--bad)}
+pre{white-space:pre-wrap;font-size:12px;background:var(--field);padding:10px;border-radius:8px;max-height:320px;overflow:auto}
+.switch{display:flex;align-items:center;gap:10px;margin-top:12px;cursor:pointer;color:var(--text);font-size:15px}
+.switch input{width:20px;height:20px;accent-color:var(--accent)}
+input[type=range]{width:100%;accent-color:var(--accent)}
+.need{font-size:12px;color:var(--warn);margin-left:6px}
+#login{max-width:380px;margin:12vh auto 0}
+.hidden{display:none!important}
+.muted{color:var(--muted)}
+.small{font-size:13px}
+esp-web-install-button button{all:unset}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><div class="logo"><i></i></div><h1>Box Control</h1>
+    <button class="btn ghost sm hidden" id="logoutBtn">Log out</button></header>
+
+  <!-- login -->
+  <div id="login" class="card">
+    <h2>Log in</h2>
+    <p class="sub">Use the admin password for your ESP Box backend.</p>
+    <input type="password" id="pw" placeholder="Admin password" autocomplete="current-password">
+    <div class="actions"><button class="btn" id="loginBtn">Log in</button></div>
+  </div>
+
+  <div id="app" class="hidden">
+    <nav id="tabs"></nav>
+
+    <!-- BOXES -->
+    <section data-tab="boxes">
+      <div class="card" id="pairCard">
+        <h2>Pair a box</h2>
+        <p class="sub">A new box shows a 6-digit code on its screen. Enter it here.</p>
+        <input type="text" id="pairCode" class="code-in" inputmode="numeric" maxlength="6" placeholder="000000">
+        <label>Name (optional)</label>
+        <input type="text" id="pairName" placeholder="Desk box">
+        <div class="actions"><button class="btn" id="pairBtn">Pair</button></div>
+      </div>
+      <div class="card"><h2>Your boxes</h2><div class="list" id="devList"></div></div>
+    </section>
+
+    <!-- AI -->
+    <section data-tab="ai">
+      <div class="card">
+        <h2>Brain</h2><p class="sub">The model that answers questions.</p>
+        <div class="row">
+          <div><label>Provider</label><select id="llm_provider"></select></div>
+          <div><label>Model</label><input type="text" id="llm_model" list="llm_models"><datalist id="llm_models"></datalist></div>
+        </div>
+        <label>Personality / instructions</label>
+        <textarea id="system_prompt"></textarea>
+        <div class="row">
+          <div><label>Remember last N exchanges (within 10 min)</label><input type="number" id="max_history" min="0" max="20"></div>
+          <div><label>Language</label>
+            <select id="language">
+              <option value="en">English</option><option value="hi">Hindi</option><option value="auto">Auto detect</option>
+            </select></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Ears</h2><p class="sub">Speech-to-text for your question.</p>
+        <div class="row">
+          <div><label>Provider</label><select id="stt_provider"></select></div>
+          <div><label>Model</label><input type="text" id="stt_model" list="stt_models"><datalist id="stt_models"></datalist></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Voice</h2><p class="sub">Text-to-speech for the answer.</p>
+        <div class="row">
+          <div><label>Provider</label><select id="tts_provider"></select></div>
+          <div><label>Model</label><input type="text" id="tts_model" list="tts_models"><datalist id="tts_models"></datalist></div>
+        </div>
+        <label>Voice <span class="muted small" id="voiceHint"></span></label>
+        <input type="text" id="tts_voice" list="tts_voices"><datalist id="tts_voices"></datalist>
+      </div>
+      <div class="card">
+        <h2>Box</h2>
+        <label>Speaker volume: <b id="volumeVal"></b></label><input type="range" id="volume" min="0" max="100">
+        <label>Screen brightness: <b id="brightnessVal"></b></label><input type="range" id="brightness" min="5" max="100">
+        <label>Check-in interval (seconds)</label><input type="number" id="poll_seconds" min="10" max="3600">
+        <div class="actions"><button class="btn" id="saveAi">Save settings</button><span class="small muted">Boxes pick up changes at their next check-in.</span></div>
+      </div>
+      <div class="card">
+        <h2>Try it</h2><p class="sub">Ask with the saved settings, without the box.</p>
+        <input type="text" id="testQ" placeholder="What is the capital of Japan?">
+        <div class="actions"><button class="btn ghost" id="testBtn">Ask</button><button class="btn ghost" id="voiceBtn">Play voice</button></div>
+        <div id="testOut" class="small" style="margin-top:10px"></div>
+      </div>
+    </section>
+
+    <!-- KEYS -->
+    <section data-tab="keys">
+      <div class="card">
+        <h2>API keys</h2>
+        <p class="sub">Stored encrypted on your backend. The box never sees them. Keys marked "in use" are needed by your current settings.</p>
+        <div class="list" id="keyList"></div>
+      </div>
+    </section>
+
+    <!-- WIFI -->
+    <section data-tab="wifi">
+      <div class="card">
+        <h2>Add a network</h2>
+        <p class="sub">Online boxes download this list at their next check-in, so add a new network before you change routers. If a box can't connect to anything, it shows a Wi-Fi setup screen and a hotspot for your phone.</p>
+        <div class="row">
+          <div><label>Network name (SSID)</label><input type="text" id="wSsid" maxlength="32" autocapitalize="off"></div>
+          <div><label>Password</label><input type="text" id="wPass" maxlength="63" autocapitalize="off" autocomplete="off" placeholder="Empty for open networks"></div>
+        </div>
+        <label>Priority (higher is tried first)</label><input type="number" id="wPrio" value="0">
+        <div class="actions"><button class="btn" id="wAdd">Save network</button></div>
+      </div>
+      <div class="card"><h2>Saved networks</h2><div class="list" id="wifiList"></div></div>
+    </section>
+
+    <!-- UPDATES -->
+    <section data-tab="updates">
+      <div class="card">
+        <h2>Firmware updates</h2>
+        <p class="sub">Every push to the repo builds new firmware. Boxes install it over Wi-Fi and roll back automatically if it fails.</p>
+        <label class="switch"><input type="checkbox" id="auto_update"> Update boxes automatically</label>
+        <label>Version to run</label>
+        <select id="pinned_version"></select>
+        <div class="actions"><button class="btn" id="saveUpd">Save</button></div>
+      </div>
+      <div class="card"><h2>Builds</h2><div class="list" id="relList"></div><div id="buildLogs"></div></div>
+      <div class="card">
+        <h2>First install over USB</h2>
+        <p class="sub">Only needed once per box. Use Chrome or Edge on a laptop, plug the box in with USB-C, then press Install.</p>
+        <div id="flashArea"><button class="btn ghost" id="flashPrep">Prepare installer</button></div>
+      </div>
+    </section>
+
+    <!-- HISTORY -->
+    <section data-tab="history">
+      <div class="card"><h2>Recent questions</h2><div class="list" id="histList"></div>
+        <div class="actions"><button class="btn ghost sm" id="refreshHist">Refresh</button></div></div>
+    </section>
+
+    <!-- ACCOUNT -->
+    <section data-tab="account">
+      <div class="card">
+        <h2>Admin password</h2>
+        <label>New password</label><input type="password" id="newPw" autocomplete="new-password">
+        <div class="actions"><button class="btn" id="pwBtn">Change password</button></div>
+      </div>
+    </section>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const API = "https://sxzeggllkdirvfnravfe.supabase.co/functions/v1/api";
+
+const LLM = {
+  openai:     { label: "OpenAI",        models: ["gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1", "gpt-4o"] },
+  anthropic:  { label: "Anthropic",     models: ["claude-haiku-4-5", "claude-sonnet-4-5"] },
+  gemini:     { label: "Google Gemini", models: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"] },
+  groq:       { label: "Groq",          models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"] },
+  openrouter: { label: "OpenRouter",    models: ["openai/gpt-4o-mini", "anthropic/claude-haiku-4.5", "google/gemini-2.5-flash"] },
+};
+const STT = {
+  openai:     { label: "OpenAI",     models: ["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "whisper-1"] },
+  groq:       { label: "Groq",       models: ["whisper-large-v3-turbo", "whisper-large-v3"] },
+  elevenlabs: { label: "ElevenLabs", models: ["scribe_v1"] },
+  gemini:     { label: "Google Gemini", models: ["gemini-2.5-flash"] },
+};
+const TTS = {
+  openai:     { label: "OpenAI", models: ["gpt-4o-mini-tts", "tts-1"],
+                voices: ["alloy","ash","coral","echo","fable","nova","onyx","sage","shimmer"], hint: "" },
+  elevenlabs: { label: "ElevenLabs", models: ["eleven_flash_v2_5", "eleven_multilingual_v2"],
+                voices: ["21m00Tcm4TlvDq8ikWAM"], hint: "(voice ID from your ElevenLabs library)" },
+  gemini:     { label: "Google Gemini", models: ["gemini-2.5-flash-preview-tts"],
+                voices: ["Kore","Puck","Charon","Aoede","Fenrir","Leda"], hint: "" },
+};
+const KEY_PROVIDERS = {
+  openai: "OpenAI", anthropic: "Anthropic", gemini: "Google Gemini", groq: "Groq",
+  openrouter: "OpenRouter", elevenlabs: "ElevenLabs",
+};
+const TABS = [["boxes","Boxes"],["ai","AI"],["keys","API keys"],["wifi","Wi-Fi"],["updates","Updates"],["history","History"],["account","Account"]];
+
+const $ = (id) => document.getElementById(id);
+let PW = "";
+let S = null;   // last state
+
+function store(k, v) { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (_) {} }
+function load(k) { try { return localStorage.getItem(k); } catch (_) { return null; } }
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function toast(msg, ms = 2600) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), ms); }
+function ago(iso) {
+  if (!iso) return "never";
+  const s = (Date.now() - new Date(iso)) / 1000;
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + " min ago";
+  if (s < 86400) return Math.floor(s / 3600) + " h ago";
+  return new Date(iso).toLocaleDateString();
+}
+
+async function call(path, body, raw = false) {
+  const res = await fetch(API + path, {
+    method: "POST",
+    headers: { Authorization: "Bearer " + PW, "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  if (raw && res.ok) return res;
+  const j = await res.json().catch(() => ({ error: "Bad response (" + res.status + ")" }));
+  if (!res.ok || j.error) {
+    if (res.status === 401) { logout(); }
+    throw new Error(j.error || ("HTTP " + res.status));
+  }
+  return j;
+}
+
+async function withBtn(btn, fn) {
+  btn.disabled = true;
+  try { await fn(); } catch (e) { toast(e.message, 5000); } finally { btn.disabled = false; }
+}
+
+// ---------- login ----------
+async function login(pw) {
+  PW = pw;
+  try {
+    await refresh();
+    store("box_pw", pw);
+    $("login").classList.add("hidden");
+    $("app").classList.remove("hidden");
+    $("logoutBtn").classList.remove("hidden");
+  } catch (e) {
+    PW = "";
+    $("login").classList.remove("hidden");
+    toast(e.message);
+  }
+}
+function logout() {
+  PW = ""; store("box_pw", null);
+  $("app").classList.add("hidden"); $("login").classList.remove("hidden"); $("logoutBtn").classList.add("hidden");
+}
+$("loginBtn").onclick = () => login($("pw").value.trim());
+$("pw").onkeydown = (e) => { if (e.key === "Enter") login($("pw").value.trim()); };
+$("logoutBtn").onclick = logout;
+
+// ---------- tabs ----------
+function showTab(id) {
+  document.querySelectorAll("section[data-tab]").forEach(s => s.classList.toggle("hidden", s.dataset.tab !== id));
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.id === id));
+  store("box_tab", id);
+}
+$("tabs").innerHTML = TABS.map(([id, l]) => `<button data-id="${id}">${l}</button>`).join("");
+$("tabs").onclick = (e) => { const b = e.target.closest("button"); if (b) showTab(b.dataset.id); };
+showTab(load("box_tab") || "boxes");
+
+// ---------- render ----------
+function fillSelect(sel, obj, value) {
+  sel.innerHTML = Object.entries(obj).map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join("");
+  sel.value = value;
+}
+function fillList(id, arr) { $(id).innerHTML = (arr || []).map(v => `<option value="${esc(v)}">`).join(""); }
+
+function syncModelLists() {
+  fillList("llm_models", LLM[$("llm_provider").value]?.models);
+  fillList("stt_models", STT[$("stt_provider").value]?.models);
+  const t = TTS[$("tts_provider").value];
+  fillList("tts_models", t?.models); fillList("tts_voices", t?.voices);
+  $("voiceHint").textContent = t?.hint || "";
+}
+function onProviderChange(kind, cat) {
+  const p = $(kind + "_provider").value;
+  $(kind + "_model").value = cat[p].models[0];
+  if (kind === "tts") $("tts_voice").value = cat[p].voices[0] || "";
+  syncModelLists();
+}
+$("llm_provider").onchange = () => onProviderChange("llm", LLM);
+$("stt_provider").onchange = () => onProviderChange("stt", STT);
+$("tts_provider").onchange = () => onProviderChange("tts", TTS);
+["volume","brightness"].forEach(k => $(k).oninput = () => $(k + "Val").textContent = $(k).value + "%");
+
+function render(full = true) {
+  const s = S.settings;
+  if (full) renderForms(s);
+  renderLive(s);
+}
+
+// Parts with inputs: only re-rendered after login or a save, so typing isn't wiped
+function renderForms(s) {
+  // AI
+  fillSelect($("llm_provider"), LLM, s.llm_provider);
+  fillSelect($("stt_provider"), STT, s.stt_provider);
+  fillSelect($("tts_provider"), TTS, s.tts_provider);
+  for (const k of ["llm_model","stt_model","tts_model","tts_voice","system_prompt","max_history","language","volume","brightness","poll_seconds"]) $(k).value = s[k];
+  $("volumeVal").textContent = s.volume + "%"; $("brightnessVal").textContent = s.brightness + "%";
+  syncModelLists();
+
+  // keys
+  const have = Object.fromEntries(S.keys.map(k => [k.provider, k]));
+  const needed = new Set([s.llm_provider, s.stt_provider, s.tts_provider]);
+  $("keyList").innerHTML = Object.entries(KEY_PROVIDERS).map(([p, label]) => {
+    const k = have[p];
+    return `<div class="item"><div class="grow">
+      <div class="t">${label}${needed.has(p) ? `<span class="need">in use${k ? "" : ", missing"}</span>` : ""}</div>
+      <div class="m">${k ? `Saved, ends in ${esc(k.last4)} · ${ago(k.updated_at)}` : "Not set"}</div>
+      <div class="actions" style="margin-top:8px">
+        <input type="password" placeholder="Paste new key" data-keyin="${p}" style="flex:1;min-width:160px" autocomplete="off">
+        <button class="btn sm" data-keysave="${p}">Save</button>
+        ${k ? `<button class="btn danger sm" data-keydel="${p}">Remove</button>` : ""}
+      </div></div></div>`;
+  }).join("");
+
+  // wifi
+  $("wifiList").innerHTML = S.wifi.length ? S.wifi.map(w => `<div class="item"><div class="grow">
+      <div class="t">${esc(w.ssid)}</div><div class="m">${w.password ? "Password saved" : "Open network"} · priority ${w.priority}</div></div>
+      <button class="btn danger sm" data-wdel="${esc(w.ssid)}">Remove</button></div>`).join("")
+    : `<div class="empty">No networks saved here yet. Networks entered on a box's screen stay on that box.</div>`;
+
+  // updates
+  $("auto_update").checked = s.auto_update;
+  $("pinned_version").innerHTML = `<option value="">Latest build</option>` +
+    S.releases.map(r => `<option value="${esc(r.version)}">v${esc(r.version)}</option>`).join("");
+  $("pinned_version").value = s.pinned_version || "";
+}
+
+// Read-only parts: safe to refresh every few seconds
+function renderLive(s) {
+  // devices
+  const devs = S.devices;
+  const pending = devs.some(d => d.status === "pending");
+  $("pairCard").style.borderColor = pending ? "var(--accent)" : "";
+  $("devList").innerHTML = devs.length ? devs.map(d => {
+    const online = d.last_seen && (Date.now() - new Date(d.last_seen)) / 1000 < s.poll_seconds * 2 + 30;
+    const dot = d.status === "pending" ? "wait" : d.status === "blocked" ? "off" : online ? "on" : "";
+    const st = d.status === "pending" ? `<span class="pill warn">waiting for code</span>`
+      : d.status === "blocked" ? `<span class="pill bad">blocked</span>`
+      : online ? `<span class="pill ok">online</span>` : `<span class="pill">offline</span>`;
+    const fail = d.ota_failed ? `<div class="m err">Update ${esc(d.ota_failed)} failed on this box and was rolled back. The next build will be tried automatically.</div>` : "";
+    return `<div class="item"><span class="dot ${dot}"></span><div class="grow">
+      <div class="t">${esc(d.name)} ${st}</div>
+      <div class="m">${[d.fw_version && "v" + d.fw_version, d.ssid && d.ssid + (d.rssi ? " (" + d.rssi + " dBm)" : ""), d.ip, "seen " + ago(d.last_seen)].filter(Boolean).map(esc).join(" · ")}</div>
+      <div class="m">ID ${esc(d.id)}</div>${fail}</div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <button class="btn ghost sm" data-rename="${d.id}">Rename</button>
+        ${d.status === "blocked" ? `<button class="btn ghost sm" data-unblock="${d.id}">Unblock</button>` : d.status === "active" ? `<button class="btn danger sm" data-block="${d.id}">Block</button>` : ""}
+        <button class="btn danger sm" data-remove="${d.id}">Remove</button>
+      </div></div>`;
+  }).join("") : `<div class="empty">No boxes yet. Flash one from the Updates tab, then pair it here.</div>`;
+
+  $("relList").innerHTML = S.releases.length ? S.releases.map((r, i) => `<div class="item"><div class="grow">
+      <div class="t">v${esc(r.version)} ${i === 0 ? '<span class="pill ok">latest</span>' : ""}</div>
+      <div class="m">${new Date(r.created_at).toLocaleString()} · ${r.size ? (r.size / 1048576).toFixed(2) + " MB" : ""} · ${esc((r.git_sha || "").slice(0, 7))}</div>
+      ${r.notes ? `<div class="m">${esc(r.notes)}</div>` : ""}</div></div>`).join("")
+    : `<div class="empty">No builds yet. The first one appears after the GitHub workflow runs.</div>`;
+  const lastFail = S.builds.find(b => b.status !== "success");
+  $("buildLogs").innerHTML = lastFail && (!S.releases[0] || new Date(lastFail.created_at) > new Date(S.releases[0].created_at))
+    ? `<details style="margin-top:10px"><summary class="err">Latest build failed (${ago(lastFail.created_at)})</summary><pre>${esc(lastFail.log)}</pre></details>` : "";
+
+  renderHistory();
+}
+
+function renderHistory() {
+  const names = Object.fromEntries(S.devices.map(d => [d.id, d.name]));
+  $("histList").innerHTML = S.conversations.length ? S.conversations.map(c => `<div class="item"><div class="grow">
+      <div class="q">${esc(names[c.device_id] || "box")} · ${ago(c.created_at)} · ${c.latency_ms ? (c.latency_ms / 1000).toFixed(1) + " s" : ""} · ${esc(c.llm_provider || "")}</div>
+      <div class="a"><b>Q:</b> ${esc(c.question || "(no speech)")}</div>
+      ${c.error ? `<div class="a err">${esc(c.error)}</div>` : `<div class="a"><b>A:</b> ${esc(c.answer)}</div>`}
+    </div></div>`).join("") : `<div class="empty">Nothing asked yet.</div>`;
+}
+
+async function refresh(full = true) { S = await call("/admin/state"); render(full); }
+
+// ---------- actions ----------
+$("pairBtn").onclick = (e) => withBtn(e.target, async () => {
+  await call("/admin/pair", { code: $("pairCode").value, name: $("pairName").value.trim() });
+  $("pairCode").value = ""; $("pairName").value = "";
+  toast("Paired! The box unlocks within a few seconds.");
+  await refresh();
+});
+
+$("devList").onclick = async (e) => {
+  const t = e.target, d = t.dataset;
+  if (d.rename) { const n = prompt("New name"); if (n) { await call("/admin/device", { id: d.rename, name: n }); refresh(); } }
+  if (d.block && confirm("Block this box? It stops answering until unblocked.")) { await call("/admin/device", { id: d.block, status: "blocked" }); refresh(); }
+  if (d.unblock) { await call("/admin/device", { id: d.unblock, status: "active" }); refresh(); }
+  if (d.remove && confirm("Remove this box? It will show a new pairing code.")) { await call("/admin/device/delete", { id: d.remove }); refresh(); }
+};
+
+$("saveAi").onclick = (e) => withBtn(e.target, async () => {
+  const body = {};
+  for (const k of ["llm_provider","llm_model","stt_provider","stt_model","tts_provider","tts_model","tts_voice","system_prompt","language"]) body[k] = $(k).value;
+  for (const k of ["max_history","volume","brightness","poll_seconds"]) body[k] = Number($(k).value);
+  await call("/admin/settings", body);
+  toast("Saved"); await refresh();
+});
+
+$("testBtn").onclick = (e) => withBtn(e.target, async () => {
+  $("testOut").textContent = "Thinking...";
+  try {
+    const r = await call("/admin/test", { text: $("testQ").value });
+    $("testOut").innerHTML = `${esc(r.answer)} <span class="muted">(${(r.ms / 1000).toFixed(1)} s)</span>`;
+  } catch (err) { $("testOut").innerHTML = `<span class="err">${esc(err.message)}</span>`; }
+});
+
+let actx;
+$("voiceBtn").onclick = (e) => withBtn(e.target, async () => {
+  const text = ($("testOut").innerText.replace(/\(\d+\.\d s\)$/, "").trim()) || "Hello, I am your ESP box assistant.";
+  const res = await call("/admin/tts", { text }, true);
+  const rate = Number(res.headers.get("X-Sample-Rate") || 24000);
+  const raw = await res.arrayBuffer();
+  const buf = new Int16Array(raw, 0, Math.floor(raw.byteLength / 2));
+  actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+  const ab = actx.createBuffer(1, buf.length, rate);
+  const ch = ab.getChannelData(0);
+  for (let i = 0; i < buf.length; i++) ch[i] = buf[i] / 32768;
+  const src = actx.createBufferSource(); src.buffer = ab; src.connect(actx.destination); src.start();
+});
+
+$("keyList").onclick = async (e) => {
+  const d = e.target.dataset;
+  if (d.keysave) {
+    const inp = document.querySelector(`[data-keyin="${d.keysave}"]`);
+    if (!inp.value.trim()) return toast("Paste a key first");
+    await withBtn(e.target, async () => { await call("/admin/key", { provider: d.keysave, key: inp.value.trim() }); toast("Key saved"); await refresh(); });
+  }
+  if (d.keydel && confirm("Remove this key?")) {
+    await withBtn(e.target, async () => { await call("/admin/key", { provider: d.keydel, key: "" }); toast("Key removed"); await refresh(); });
+  }
+};
+
+$("wAdd").onclick = (e) => withBtn(e.target, async () => {
+  await call("/admin/wifi", { ssid: $("wSsid").value.trim(), password: $("wPass").value, priority: Number($("wPrio").value) || 0 });
+  $("wSsid").value = ""; $("wPass").value = ""; $("wPrio").value = 0;
+  toast("Network saved. Online boxes get it at their next check-in."); await refresh();
+});
+$("wifiList").onclick = async (e) => {
+  const s = e.target.dataset.wdel;
+  if (s && confirm(`Remove ${s}?`)) { await call("/admin/wifi/delete", { ssid: s }); refresh(); }
+};
+
+$("saveUpd").onclick = (e) => withBtn(e.target, async () => {
+  await call("/admin/settings", { auto_update: $("auto_update").checked, pinned_version: $("pinned_version").value || null });
+  toast("Saved"); await refresh();
+});
+
+$("flashPrep").onclick = (e) => withBtn(e.target, async () => {
+  if (!("serial" in navigator)) { toast("This browser can't flash over USB. Use Chrome or Edge on a laptop.", 5000); return; }
+  const r = await call("/admin/flash");
+  const url = URL.createObjectURL(new Blob([JSON.stringify(r.manifest)], { type: "application/json" }));
+  await import("https://unpkg.com/esp-web-tools@10.1.1/dist/web/install-button.js?module");
+  $("flashArea").innerHTML = `<p class="small">Ready: v${esc(r.version)}. This erases the box and installs the assistant.</p>
+    <esp-web-install-button manifest="${url}"><button slot="activate" class="btn">Install on box</button></esp-web-install-button>`;
+});
+
+$("refreshHist").onclick = (e) => withBtn(e.target, () => refresh(false));
+
+$("pwBtn").onclick = (e) => withBtn(e.target, async () => {
+  const p = $("newPw").value;
+  await call("/admin/password", { password: p });
+  PW = p; store("box_pw", p); $("newPw").value = "";
+  toast("Password changed");
+});
+
+// auto refresh boxes and history every 20 s while visible
+setInterval(() => { if (PW && !document.hidden) refresh(false).catch(() => {}); }, 20000);
+
+const saved = load("box_pw");
+if (saved) login(saved);
+</script>
+</body>
+</html>
