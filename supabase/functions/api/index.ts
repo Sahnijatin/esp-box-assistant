@@ -46,7 +46,7 @@ function systemPrompt(s: any): string {
 // Hinglish replies carry a Roman version for the screen and a mixed-script version for the voice
 function splitReply(raw: string, language: string): { display: string; speech: string } {
   if (language !== "hinglish") return { display: raw, speech: raw };
-  const d = raw.match(/DISPLAY:\s*([\s\S]*?)(?:\n\s*SPEECH:|$)/i);
+  const d = raw.match(/DISPLAY:\s*([\s\S]*?)(?:\s*SPEECH:|$)/i);
   const sp = raw.match(/SPEECH:\s*([\s\S]*)$/i);
   const display = (d?.[1] ?? raw.replace(/SPEECH:[\s\S]*$/i, "")).trim();
   return { display, speech: (sp?.[1] ?? display).trim() };
@@ -182,22 +182,27 @@ async function deviceHello(req: Request) {
 }
 
 async function deviceAsk(req: Request) {
-  const dev = await deviceAuth(req);
+  const [dev, s] = await Promise.all([deviceAuth(req), getSettings()]);
   const wav = new Uint8Array(await req.arrayBuffer());
   if (wav.length < 8000) return json({ error: "Recording too short" });
-  const s = await getSettings();
   const t0 = Date.now();
   let question = "";
   try {
+    // Fetch the chat key and recent history while the audio is being transcribed
+    const since = new Date(Date.now() - 10 * 60_000).toISOString();
+    const llmKey = providerKey(s.llm_provider);
+    const history = s.max_history > 0
+      ? must(db.from("conversations").select("question,answer")
+        .eq("device_id", dev.id).is("error", null).gte("created_at", since)
+        .order("created_at", { ascending: false }).limit(s.max_history))
+      : Promise.resolve([]);
+    llmKey.catch(() => {});    // awaited below; avoid an unhandled rejection on early return
+    history.catch(() => {});
+
     question = await transcribe(s.stt_provider, s.stt_model, await providerKey(s.stt_provider), wav, s.language);
     if (!question) return json({ question: "", answer: "", error: "I didn't catch that." });
 
-    const since = new Date(Date.now() - 10 * 60_000).toISOString();
-    const hist = s.max_history > 0
-      ? await must(db.from("conversations").select("question,answer")
-        .eq("device_id", dev.id).is("error", null).gte("created_at", since)
-        .order("created_at", { ascending: false }).limit(s.max_history))
-      : [];
+    const hist = await history;
     const messages: Msg[] = [];
     for (const h of hist.reverse()) {
       const prev = s.language === "hinglish" ? `DISPLAY: ${h.answer}` : h.answer;
@@ -205,7 +210,7 @@ async function deviceAsk(req: Request) {
     }
     messages.push({ role: "user", content: question });
 
-    const raw = await chat(s.llm_provider, s.llm_model, await providerKey(s.llm_provider), systemPrompt(s), messages);
+    const raw = await chat(s.llm_provider, s.llm_model, await llmKey, systemPrompt(s), messages);
     const { display, speech } = splitReply(raw, s.language);
     await db.from("conversations").insert({
       device_id: dev.id, question, answer: display, llm_provider: s.llm_provider, llm_model: s.llm_model,
@@ -227,8 +232,8 @@ async function deviceAsk(req: Request) {
   }
 }
 
-async function ttsResponse(text: string) {
-  const s = await getSettings();
+async function ttsResponse(text: string, settings?: Promise<any>) {
+  const s = await (settings ?? getSettings());
   const audio = await speak(s.tts_provider, s.tts_model, s.tts_voice, await providerKey(s.tts_provider), text.slice(0, 1500), s.language);
   return new Response(audio, {
     headers: { ...CORS, "Content-Type": "application/octet-stream", "X-Sample-Rate": String(TTS_SAMPLE_RATE) },
@@ -249,10 +254,12 @@ async function deviceRender(req: Request) {
 }
 
 async function deviceTts(req: Request) {
+  const settings = getSettings();
+  settings.catch(() => {});
   await deviceAuth(req);
   const { text } = await req.json();
   if (!text) throw new HttpError(400, "no text");
-  return await ttsResponse(String(text));
+  return await ttsResponse(String(text), settings);
 }
 
 // ======================= admin =======================
@@ -299,7 +306,11 @@ async function admin(path: string, req: Request) {
       for (const [k, t] of Object.entries(SETTING_FIELDS)) {
         if (!(k in body)) continue;
         const v = body[k];
-        if (t === "int") upd[k] = Math.round(Number(v));
+        if (t === "int") {
+          const n = Math.round(Number(v));
+          if (!Number.isFinite(n)) throw new HttpError(400, `${k} must be a number`);
+          upd[k] = n;
+        }
         else if (t === "bool") upd[k] = Boolean(v);
         else if (t === "nstr") upd[k] = v ? String(v).trim() : null;
         else upd[k] = String(v).trim();

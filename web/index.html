@@ -402,7 +402,7 @@ function renderLive(s) {
     const st = d.status === "pending" ? `<span class="pill warn">waiting for code</span>`
       : d.status === "blocked" ? `<span class="pill bad">blocked</span>`
       : online ? `<span class="pill ok">online</span>` : `<span class="pill">offline</span>`;
-    const fail = d.ota_failed ? `<div class="m err">Update ${esc(d.ota_failed)} failed on this box and was rolled back. The next build will be tried automatically.</div>` : "";
+    const fail = d.ota_failed ? `<div class="m err">Update ${esc(d.ota_failed)} failed on this box (download failed 3 times or it was rolled back). The next build will be tried automatically.</div>` : "";
     return `<div class="item"><span class="dot ${dot}"></span><div class="grow">
       <div class="t">${esc(d.name)} ${st}</div>
       <div class="m">${[d.fw_version && "v" + d.fw_version, d.ssid && d.ssid + (d.rssi ? " (" + d.rssi + " dBm)" : ""), d.ip, "seen " + ago(d.last_seen)].filter(Boolean).map(esc).join(" · ")}</div>
@@ -445,12 +445,12 @@ $("pairBtn").onclick = (e) => withBtn(e.target, async () => {
   await refresh();
 });
 
-$("devList").onclick = async (e) => {
+$("devList").onclick = (e) => {
   const t = e.target, d = t.dataset;
-  if (d.rename) { const n = prompt("New name"); if (n) { await call("/admin/device", { id: d.rename, name: n }); refresh(); } }
-  if (d.block && confirm("Block this box? It stops answering until unblocked.")) { await call("/admin/device", { id: d.block, status: "blocked" }); refresh(); }
-  if (d.unblock) { await call("/admin/device", { id: d.unblock, status: "active" }); refresh(); }
-  if (d.remove && confirm("Remove this box? It will show a new pairing code.")) { await call("/admin/device/delete", { id: d.remove }); refresh(); }
+  if (d.rename) { const n = prompt("New name"); if (n) withBtn(t, async () => { await call("/admin/device", { id: d.rename, name: n }); await refresh(); }); }
+  if (d.block && confirm("Block this box? It stops answering until unblocked.")) withBtn(t, async () => { await call("/admin/device", { id: d.block, status: "blocked" }); await refresh(); });
+  if (d.unblock) withBtn(t, async () => { await call("/admin/device", { id: d.unblock, status: "active" }); await refresh(); });
+  if (d.remove && confirm("Remove this box? It will show a new pairing code.")) withBtn(t, async () => { await call("/admin/device/delete", { id: d.remove }); await refresh(); });
 };
 
 $("saveAi").onclick = (e) => withBtn(e.target, async () => {
@@ -504,7 +504,7 @@ $("wAdd").onclick = (e) => withBtn(e.target, async () => {
 });
 $("wifiList").onclick = async (e) => {
   const s = e.target.dataset.wdel;
-  if (s && confirm(`Remove ${s}?`)) { await call("/admin/wifi/delete", { ssid: s }); refresh(); }
+  if (s && confirm(`Remove ${s}?`)) await withBtn(e.target, async () => { await call("/admin/wifi/delete", { ssid: s }); await refresh(); });
 };
 
 $("saveUpd").onclick = (e) => withBtn(e.target, async () => {

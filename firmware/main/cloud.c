@@ -105,11 +105,17 @@ static void read_body(esp_http_client_handle_t c, resp_t *r)
     int cap = 4096;
     r->body = malloc(cap + 1);
     r->len = 0;
+    if (!r->body) {
+        r->body = strdup("");
+        return;
+    }
     for (;;) {
         if (r->len == cap) {
             if (cap >= 32768) break;
+            char *nb = realloc(r->body, cap * 2 + 1);
+            if (!nb) break;
+            r->body = nb;
             cap *= 2;
-            r->body = realloc(r->body, cap + 1);
         }
         int n = esp_http_client_read(c, r->body + r->len, cap - r->len);
         if (n <= 0) break;
@@ -167,7 +173,9 @@ bool cloud_ask(const uint8_t *wav, size_t len, char **question, char **answer, c
         if (e && *e) {
             *error = dupstr(e);
         } else if (r.status != 200 || !a) {
-            *error = dupstr(r.status == 401 || r.status == 403 ? "This box isn't paired." : "Server error.");
+            bool unpaired = r.status == 401 || r.status == 403;
+            *error = dupstr(unpaired ? "This box isn't paired." : "Server error.");
+            if (unpaired) cloud_poll_now();   // check-in shows the pairing code or blocked state
         } else {
             const char *sp = cJSON_GetStringValue(cJSON_GetObjectItem(j, "speech"));
             *answer = dupstr(a);
@@ -241,8 +249,8 @@ bool cloud_speak(const char *text, volatile bool *stop)
     if (esp_http_client_open(c, blen) == ESP_OK && write_all(c, (uint8_t *)body, blen)) {
         esp_http_client_fetch_headers(c);
         int status = esp_http_client_get_status_code(c);
-        if (status == 200) {
-            uint8_t *buf = heap_caps_malloc(4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        uint8_t *buf = status == 200 ? heap_caps_malloc(4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) : NULL;
+        if (buf) {
             int carry = -1;    // odd byte left from the previous chunk
             audio_play_begin(TTS_SAMPLE_RATE);
             for (;;) {
@@ -258,7 +266,7 @@ bool cloud_speak(const char *text, volatile bool *stop)
             audio_play_end();
             free(buf);
             ok = true;
-        } else {
+        } else if (status != 200) {
             resp_t r;
             read_body(c, &r);
             ESP_LOGW(TAG, "tts failed %d: %s", status, r.body);
@@ -308,7 +316,14 @@ static int apply_config(const cJSON *cfg)
     if (ver && url && strcmp(ver, ota_failed) != 0) {
         if (assistant_busy()) return 5;   // try again once the conversation is over
         ESP_LOGI(TAG, "update available: %s", ver);
-        if (!ota_run(url, ver)) {           // only returns on failure
+        // A Wi-Fi blip shouldn't rule a build out: give up on it after 3 failed attempts
+        static char tried_ver[33];
+        static int tries;
+        if (strcmp(tried_ver, ver) != 0) {
+            strlcpy(tried_ver, ver, sizeof(tried_ver));
+            tries = 0;
+        }
+        if (!ota_run(url, ver) && ++tries >= 3) {   // ota_run only returns on failure
             strlcpy(ota_failed, ver, sizeof(ota_failed));
             nvs_handle_t h;
             if (nvs_open("dev", NVS_READWRITE, &h) == ESP_OK) {
