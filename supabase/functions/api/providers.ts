@@ -176,6 +176,16 @@ export async function chat(
 
 export const TTS_SAMPLE_RATE = 24000;
 
+// gpt-4o-*-tts models take a style instruction; tts-1 models take a speed number
+function openaiSpeech(model: string, voice: string, text: string, speed: number) {
+  const body: Record<string, unknown> = { model, voice: voice || "alloy", input: text, response_format: "pcm" };
+  if (speed !== 1) {
+    if (/^tts-1/.test(model)) body.speed = clamp(speed, 0.25, 4);
+    else if (paceInstruction(speed)) body.instructions = paceInstruction(speed);
+  }
+  return body;
+}
+
 // Strips a WAV header if present, returning the raw PCM samples
 function wavToPcm(b: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
   if (b.length < 44 || String.fromCharCode(...b.subarray(0, 4)) !== "RIFF") return b;
@@ -189,9 +199,22 @@ function wavToPcm(b: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
   return b.slice(44);
 }
 
+// Speaking pace as words, for models that take a style prompt instead of a speed number
+function paceInstruction(speed: number): string {
+  if (speed <= 0.8) return "Speak slowly, at a calm and relaxed pace, with clear pauses between sentences.";
+  if (speed < 0.95) return "Speak at a slightly slower, relaxed pace.";
+  if (speed >= 1.25) return "Speak quickly and briskly.";
+  if (speed > 1.05) return "Speak at a slightly faster pace.";
+  return "";
+}
+
+const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
+
+// speed: 1.0 = normal; each provider gets it in its own form (and range)
 export async function speak(
-  provider: string, model: string, voice: string, key: string, text: string, language = "en",
+  provider: string, model: string, voice: string, key: string, text: string, language = "en", speed = 1,
 ): Promise<ReadableStream<Uint8Array> | Uint8Array<ArrayBuffer>> {
+  if (!Number.isFinite(speed) || speed <= 0) speed = 1;
   if (provider === "sarvam") {
     const m = model || "bulbul:v3";
     const body: Record<string, unknown> = {
@@ -202,6 +225,7 @@ export async function speak(
       output_audio_codec: "wav",
     };
     if (voice) body.speaker = voice;
+    if (speed !== 1) body.pace = clamp(speed, 0.5, 2);
     const res = await call("https://api.sarvam.ai/text-to-speech", {
       method: "POST",
       headers: { "api-subscription-key": key, "Content-Type": "application/json" },
@@ -219,7 +243,7 @@ export async function speak(
     const res = await call("https://api.openai.com/v1/audio/speech", {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, voice: voice || "alloy", input: text, response_format: "pcm" }),
+      body: JSON.stringify(openaiSpeech(model, voice, text, speed)),
     });
     return res.body!;
   }
@@ -229,7 +253,10 @@ export async function speak(
       {
         method: "POST",
         headers: { "xi-api-key": key, "Content-Type": "application/json" },
-        body: JSON.stringify({ text, model_id: model || "eleven_flash_v2_5" }),
+        body: JSON.stringify({
+          text, model_id: model || "eleven_flash_v2_5",
+          ...(speed !== 1 ? { voice_settings: { speed: clamp(speed, 0.7, 1.2) } } : {}),
+        }),
       },
     );
     return res.body!;
@@ -241,7 +268,8 @@ export async function speak(
         method: "POST",
         headers: { "Content-Type": "application/json", "x-goog-api-key": key },
         body: JSON.stringify({
-          contents: [{ parts: [{ text }] }],
+          // Gemini TTS takes style as part of the prompt
+          contents: [{ parts: [{ text: paceInstruction(speed) ? `${paceInstruction(speed)} Say: ${text}` : text }] }],
           generationConfig: {
             responseModalities: ["AUDIO"],
             speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice || "Kore" } } },

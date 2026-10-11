@@ -139,6 +139,8 @@ esp-web-install-button button{all:unset}
         </div>
         <label>Voice <span class="muted small" id="voiceHint"></span></label>
         <input type="text" id="tts_voice" list="tts_voices"><datalist id="tts_voices"></datalist>
+        <label>Speaking pace: <b id="tts_speedVal"></b> <span class="muted small">(1.0× is the voice's normal speed)</span></label>
+        <input type="range" id="tts_speed" min="0.5" max="1.5" step="0.05">
       </div>
       <div class="card">
         <h2>Box</h2>
@@ -359,6 +361,8 @@ $("llm_provider").onchange = () => onProviderChange("llm", LLM);
 $("stt_provider").onchange = () => onProviderChange("stt", STT);
 $("tts_provider").onchange = () => onProviderChange("tts", TTS);
 ["volume","brightness"].forEach(k => $(k).oninput = () => $(k + "Val").textContent = $(k).value + "%");
+const paceLabel = (v) => Number(v).toFixed(2).replace(/0$/, "") + "×" + (v < 0.97 ? " slower" : v > 1.03 ? " faster" : "");
+$("tts_speed").oninput = () => $("tts_speedVal").textContent = paceLabel($("tts_speed").value);
 
 function render(full = true) {
   const s = S.settings;
@@ -374,6 +378,7 @@ function renderForms(s) {
   fillSelect($("tts_provider"), TTS, s.tts_provider);
   for (const k of ["llm_model","stt_model","tts_model","tts_voice","system_prompt","max_history","language","volume","brightness","poll_seconds"]) $(k).value = s[k];
   $("volumeVal").textContent = s.volume + "%"; $("brightnessVal").textContent = s.brightness + "%";
+  $("tts_speed").value = s.tts_speed ?? 1; $("tts_speedVal").textContent = paceLabel(s.tts_speed ?? 1);
   syncModelLists();
 
   // keys
@@ -475,7 +480,7 @@ $("devList").onclick = (e) => {
 $("saveAi").onclick = (e) => withBtn(e.target, async () => {
   const body = {};
   for (const k of ["llm_provider","llm_model","stt_provider","stt_model","tts_provider","tts_model","tts_voice","system_prompt","language"]) body[k] = $(k).value;
-  for (const k of ["max_history","volume","brightness","poll_seconds"]) body[k] = Number($(k).value);
+  for (const k of ["max_history","volume","brightness","poll_seconds","tts_speed"]) body[k] = Number($(k).value);
   await call("/admin/settings", body);
   toast("Saved"); await refresh();
 });
