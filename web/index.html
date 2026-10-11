@@ -422,7 +422,10 @@ function renderLive(s) {
       : d.status === "blocked" ? `<span class="pill bad">blocked</span>`
       : online ? `<span class="pill ok">online</span>` : `<span class="pill">offline</span>`;
     const fail = d.ota_failed ? `<div class="m err">Update ${esc(d.ota_failed)} failed on this box (download failed 3 times or it was rolled back). The next build will be tried automatically.</div>`
-      : d.ota_retry ? `<div class="m">Retrying the update at the next check-in.</div>` : "";
+      : d.ota_retry ? `<div class="m">Retrying the update at the next check-in.</div>`
+      : d.update_to && d.update_to !== d.fw_version ? `<div class="m">Updating to v${esc(d.update_to)} at the next check-in (within ${s.poll_seconds} s while it's online).</div>` : "";
+    const latest = S.releases[0]?.version;
+    const canUpdate = d.status === "active" && latest && d.fw_version !== latest && d.update_to !== latest && !d.ota_failed;
     const conflict = d.token_conflict && d.status === "active" ? `<div class="m err">A box with this ID checked in ${ago(d.token_conflict)} with a different key, so it was not let in. If you reset or reflashed this box, remove it and pair it again. If not, someone may be imitating it. <button class="btn ghost sm" data-dismiss="${d.id}">Dismiss</button></div>` : "";
     return `<div class="item"><span class="dot ${dot}"></span><div class="grow">
       <div class="t">${esc(d.name)} ${st}</div>
@@ -431,6 +434,7 @@ function renderLive(s) {
       <div style="display:flex;flex-direction:column;gap:6px">
         <button class="btn ghost sm" data-rename="${d.id}">Rename</button>
         ${d.ota_failed ? `<button class="btn ghost sm" data-retry="${d.id}">Retry update</button>` : ""}
+        ${canUpdate ? `<button class="btn sm" data-updatenow="${d.id}">Update to v${esc(latest)}</button>` : ""}
         ${d.status === "blocked" ? `<button class="btn ghost sm" data-unblock="${d.id}">Unblock</button>` : d.status === "active" ? `<button class="btn danger sm" data-block="${d.id}">Block</button>` : ""}
         <button class="btn danger sm" data-remove="${d.id}">Remove</button>
       </div></div>`;
@@ -471,6 +475,7 @@ $("devList").onclick = (e) => {
   const t = e.target, d = t.dataset;
   if (d.rename) { const n = prompt("New name"); if (n) withBtn(t, async () => { await call("/admin/device", { id: d.rename, name: n }); await refresh(); }); }
   if (d.block && confirm("Block this box? It stops answering until unblocked.")) withBtn(t, async () => { await call("/admin/device", { id: d.block, status: "blocked" }); await refresh(); });
+  if (d.updatenow) withBtn(t, async () => { await call("/admin/device", { id: d.updatenow, update_now: true }); toast("The box installs it at its next check-in."); await refresh(); });
   if (d.retry) withBtn(t, async () => { await call("/admin/device", { id: d.retry, clear_ota_failed: true }); toast("The box retries at its next check-in."); await refresh(); });
   if (d.dismiss) withBtn(t, async () => { await call("/admin/device", { id: d.dismiss, clear_conflict: true }); await refresh(); });
   if (d.unblock) withBtn(t, async () => { await call("/admin/device", { id: d.unblock, status: "active" }); await refresh(); });
