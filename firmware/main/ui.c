@@ -151,6 +151,9 @@ static void build_main(lv_obj_t *scr)
 
     // hint + level
     hint_lbl = label(scr, &lv_font_montserrat_14, C_MUTED, "");
+    lv_obj_set_width(hint_lbl, 308);
+    lv_label_set_long_mode(hint_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(hint_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(hint_lbl, LV_ALIGN_BOTTOM_MID, 0, -66);
     level_bar = lv_bar_create(scr);
     lv_obj_set_size(level_bar, 300, 4);

@@ -48,6 +48,8 @@ Edge Function changes are deployed separately (Supabase dashboard, CLI `supabase
 
 - **First boot:** no Wi-Fi saved → Wi-Fi screen on the touchscreen + hotspot `ESP-Box-XXXX` (open `http://192.168.4.1`).
 - **Pairing:** shows a 6-digit code; enter it on the setup page under Boxes.
+- **Reflashed / erased box:** it makes a new device token, and the server won't accept it for a box that's already paired (so nobody can take over a box by copying its ID). The box says "Box was reset", the setup page flags it; remove the box there and it shows a new pairing code.
+- **Failed update:** the box tries a build up to 3 times; a build that keeps failing or gets rolled back is skipped until the next build, or until you press Retry update on the setup page.
 - **Wi-Fi changes:** add networks on the setup page (pushed to boxes at check-in), on the touchscreen (tap the top bar), or through the hotspot when nothing connects.
 - **Asking:** tap the button, speak; it stops after about 1 s of silence (or tap again).
 
@@ -78,11 +80,12 @@ All audio to the box is 24 kHz 16-bit mono PCM. Model and voice fields are free 
 
 | Route | Caller | Auth |
 |---|---|---|
-| `POST /device/hello` | box check-in: pairing, config, Wi-Fi list, update offer | device id + token |
+| `POST /device/hello` | box check-in: pairing, config, Wi-Fi list, update offer | device id + token (a paired box with a different token gets `token_mismatch` and is never re-paired automatically) |
 | `POST /device/ask` | WAV in → `{question, answer, speech?, render}` | `X-Device-Id`, `X-Device-Token` |
 | `POST /device/tts` | text → PCM stream | same |
 | `POST /device/render` | `{question, answer}` → `[w u16][h u16]` + RGB565 pixels | same |
-| `POST /admin/*` | setup page | `Bearer <admin password>` |
+| `POST /admin/login` | setup page: password → session token | admin password, rate limited (10 wrong per IP / 50 overall per 15 min) |
+| `POST /admin/*` | setup page | `Bearer <session token>` (30 days, revoked on logout or password change) |
 | `POST /ci/*` | GitHub Actions | GitHub OIDC token, repo must be `Sahnijatin/esp-box-assistant`, publishing only from `main` |
 
 ## Local build
@@ -98,7 +101,8 @@ idf.py build flash monitor
 - Project: `sxzeggllkdirvfnravfe` (Supabase, ap-south-1)
 - API keys live in Supabase Vault; the device never receives them. Removing a key sets it to an empty value.
 - Every table has RLS on with no policies; only the Edge Function (service role) touches data.
-- Admin login is a bcrypt-hashed password in `admin_auth`, changeable from the setup page.
+- Admin login is a bcrypt-hashed password in `admin_auth`, changeable from the setup page (needs the current password; logs out other browsers). The browser keeps only a session token (`admin_sessions`, stored hashed), never the password.
+- Apply migrations in order (`supabase db push`, or run `supabase/migrations/*.sql` in the SQL editor). `0002_hardening.sql` must be applied before deploying the matching Edge Function and setup page; deploy those two together, since the setup page logs in through `/admin/login`.
 
 ## Known limits
 

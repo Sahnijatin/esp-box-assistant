@@ -1,7 +1,7 @@
 // ESP Box Assistant API (single Supabase Edge Function)
 //
 //   /device/*  called by the box      auth: X-Device-Id + X-Device-Token (paired via 6-digit code)
-//   /admin/*   called by setup page   auth: Bearer <admin password>
+//   /admin/*   called by setup page   auth: Bearer <session token from /admin/login>
 //   /ci/*      called by GitHub CI    auth: GitHub Actions OIDC token (no stored secrets)
 
 import { createClient } from "npm:@supabase/supabase-js@2.45.4";
@@ -111,7 +111,7 @@ async function deviceAuth(req: Request) {
   return row;
 }
 
-async function deviceConfig(row: any) {
+async function deviceConfig(row: any, clearOtaFailed = false) {
   const s = await getSettings();
   const wifi = await must(db.from("wifi_networks").select("ssid,password,priority").order("priority", { ascending: false }));
   let update = null;
@@ -131,7 +131,7 @@ async function deviceConfig(row: any) {
   }
   return {
     volume: s.volume, brightness: s.brightness, poll_seconds: s.poll_seconds,
-    wifi, update,
+    wifi, update, ...(clearOtaFailed ? { clear_ota_failed: true } : {}),
   };
 }
 
@@ -139,13 +139,15 @@ async function deviceHello(req: Request) {
   const b = await req.json();
   const id = String(b.id ?? "").toLowerCase();
   const token = String(b.token ?? "");
-  if (!/^[0-9a-f]{12}$/.test(id) || token.length < 32) throw new HttpError(400, "bad id/token");
+  if (!/^[0-9a-f]{12}$/.test(id) || token.length < 32 || token.length > 128) throw new HttpError(400, "bad id/token");
   const hash = await sha256hex(token);
-  const telemetry = {
-    fw_version: b.fw ?? null, ip: b.ip ?? null, ssid: b.ssid ?? null,
-    rssi: Number.isFinite(b.rssi) ? b.rssi : null,
-    free_heap: Number.isFinite(b.heap) ? b.heap : null,
-    ota_failed: b.ota_failed || null,
+  // Unauthenticated input: keep it to short strings and sane numbers
+  const str = (v: unknown, max: number) => (typeof v === "string" && v ? v.slice(0, max) : null);
+  const int = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.round(v) : null);
+  const telemetry: Record<string, unknown> = {
+    fw_version: str(b.fw, 40), ip: str(b.ip, 45), ssid: str(b.ssid, 32),
+    rssi: int(b.rssi), free_heap: int(b.heap),
+    ota_failed: str(b.ota_failed, 40),
     last_seen: new Date().toISOString(),
   };
   const newPairing = () => ({
@@ -155,13 +157,26 @@ async function deviceHello(req: Request) {
 
   let row = await must(db.from("devices").select("*").eq("id", id).maybeSingle());
   if (!row) {
+    // Anyone can say hello, so keep the pending list short: drop boxes that never
+    // got paired and went quiet, then cap how many may wait at once.
+    const stale = new Date(Date.now() - 24 * 3600_000).toISOString();
+    await must(db.from("devices").delete().eq("status", "pending").lt("last_seen", stale));
+    const { count, error } = await db.from("devices").select("id", { count: "exact", head: true }).eq("status", "pending");
+    if (error) throw new HttpError(500, error.message);
+    if ((count ?? 0) >= 10) throw new HttpError(429, "Too many boxes are waiting to be paired. Pair or remove them first.");
     const p = newPairing();
     await must(db.from("devices").insert({ id, token_hash: hash, status: "pending", ...p, ...telemetry }));
     return json({ status: "pending", pair_code: p.pair_code });
   }
   if (row.status === "blocked") return json({ status: "blocked" }, 403);
+  if (row.token_hash !== hash && row.status === "active") {
+    // Either the box was wiped or someone is using its id. Never re-pair a paired
+    // box from here: flag it, and the owner removes it on the setup page to pair again.
+    await must(db.from("devices").update({ token_conflict: telemetry.last_seen }).eq("id", id));
+    return json({ status: "token_mismatch" }, 409);
+  }
   if (row.token_hash !== hash) {
-    // Box was wiped and made a new token: it has to be paired again.
+    // Not paired yet and the box made a new token (wiped before pairing): new code.
     const p = newPairing();
     await must(db.from("devices").update({ token_hash: hash, status: "pending", ...p, ...telemetry }).eq("id", id));
     return json({ status: "pending", pair_code: p.pair_code });
@@ -176,9 +191,19 @@ async function deviceHello(req: Request) {
     await must(db.from("devices").update(upd).eq("id", id));
     return json({ status: "pending", pair_code: code });
   }
+  // "Retry update" on the setup page: tell the box to forget the failed version
+  let clearOtaFailed = false;
+  if (row.ota_retry) {
+    if (telemetry.ota_failed) {
+      telemetry.ota_failed = null;
+      clearOtaFailed = true;
+    } else {
+      telemetry.ota_retry = false;   // the box has forgotten it
+    }
+  }
   row = { ...row, ...telemetry };
   await must(db.from("devices").update(telemetry).eq("id", id));
-  return json({ status: "active", name: row.name, config: await deviceConfig(row) });
+  return json({ status: "active", name: row.name, config: await deviceConfig(row, clearOtaFailed) });
 }
 
 async function deviceAsk(req: Request) {
@@ -264,11 +289,45 @@ async function deviceTts(req: Request) {
 
 // ======================= admin =======================
 
-async function adminAuth(req: Request) {
-  const pw = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
-  if (!pw) throw new HttpError(401, "password required");
-  const ok = await must(db.rpc("verify_admin", { p_password: pw }));
-  if (!ok) throw new HttpError(401, "wrong password");
+const SESSION_DAYS = 30;
+
+function bearer(req: Request): string {
+  return (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
+}
+
+function clientIp(req: Request): string {
+  return req.headers.get("cf-connecting-ip") ??
+    req.headers.get("x-forwarded-for")?.split(",")[0].trim() ?? "unknown";
+}
+
+// Checks the password with the per-IP / global failure limits
+async function checkPassword(req: Request, password: string) {
+  if (!password) throw new HttpError(401, "password required");
+  const r = await must(db.rpc("admin_login", { p_password: password, p_ip: clientIp(req) }));
+  if (r === "locked") throw new HttpError(429, "Too many wrong passwords. Try again in 15 minutes.");
+  if (r !== "ok") throw new HttpError(401, "wrong password");
+}
+
+async function newSession(): Promise<string> {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  const token = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const now = new Date();
+  await must(db.from("admin_sessions").delete().lt("expires_at", now.toISOString()));
+  await must(db.from("admin_sessions").insert({
+    token_hash: await sha256hex(token),
+    expires_at: new Date(now.getTime() + SESSION_DAYS * 86400_000).toISOString(),
+  }));
+  return token;
+}
+
+async function adminAuth(req: Request): Promise<string> {
+  const token = bearer(req);
+  if (!token) throw new HttpError(401, "login required");
+  const hash = await sha256hex(token);
+  const row = await must(db.from("admin_sessions").select("token_hash")
+    .eq("token_hash", hash).gt("expires_at", new Date().toISOString()).maybeSingle());
+  if (!row) throw new HttpError(401, "session expired, log in again");
+  return hash;
 }
 
 const SETTING_FIELDS: Record<string, "str" | "int" | "bool" | "nstr"> = {
@@ -279,8 +338,12 @@ const SETTING_FIELDS: Record<string, "str" | "int" | "bool" | "nstr"> = {
 };
 
 async function admin(path: string, req: Request) {
-  await adminAuth(req);
   const body = req.method === "POST" ? await req.json().catch(() => ({})) : {};
+  if (path === "/admin/login") {
+    await checkPassword(req, String(body.password ?? ""));
+    return json({ token: await newSession() });
+  }
+  const session = await adminAuth(req);
 
   switch (path) {
     case "/admin/state": {
@@ -288,7 +351,7 @@ async function admin(path: string, req: Request) {
         getSettings(),
         must(db.from("provider_keys").select("provider,last4,updated_at")),
         must(db.from("wifi_networks").select("*").order("priority", { ascending: false })),
-        must(db.from("devices").select("id,name,status,pair_code,fw_version,ota_failed,ip,ssid,rssi,free_heap,last_seen,created_at").order("created_at")),
+        must(db.from("devices").select("id,name,status,pair_code,fw_version,ota_failed,ota_retry,token_conflict,ip,ssid,rssi,free_heap,last_seen,created_at").order("created_at")),
         must(db.from("firmware_releases").select("*").order("created_at", { ascending: false }).limit(20)),
         must(db.from("conversations").select("*").order("created_at", { ascending: false }).limit(40)),
         must(db.from("build_logs").select("*").order("created_at", { ascending: false }).limit(5)),
@@ -355,7 +418,9 @@ async function admin(path: string, req: Request) {
       const upd: any = {};
       if (body.name) upd.name = String(body.name).slice(0, 40);
       if (["active", "blocked"].includes(body.status)) upd.status = body.status;
-      if (body.clear_ota_failed) upd.ota_failed = null;
+      if (body.clear_ota_failed) Object.assign(upd, { ota_failed: null, ota_retry: true });
+      if (body.clear_conflict) upd.token_conflict = null;
+      if (!Object.keys(upd).length) throw new HttpError(400, "nothing to change");
       await must(db.from("devices").update(upd).eq("id", String(body.id)));
       return json({ ok: true });
     }
@@ -389,10 +454,17 @@ async function admin(path: string, req: Request) {
         },
       });
     }
+    case "/admin/logout": {
+      await must(db.from("admin_sessions").delete().eq("token_hash", session));
+      return json({ ok: true });
+    }
     case "/admin/password": {
       const pw = String(body.password ?? "");
       if (pw.length < 10) throw new HttpError(400, "Use at least 10 characters");
+      await checkPassword(req, String(body.current ?? ""));
       await must(db.rpc("set_admin_password", { p_password: pw }));
+      // Log out every other browser
+      await must(db.from("admin_sessions").delete().neq("token_hash", session));
       return json({ ok: true });
     }
   }
