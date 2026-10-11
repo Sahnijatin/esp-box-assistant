@@ -259,7 +259,7 @@ async function deviceAsk(req: Request) {
 
 async function ttsResponse(text: string, settings?: Promise<any>) {
   const s = await (settings ?? getSettings());
-  const audio = await speak(s.tts_provider, s.tts_model, s.tts_voice, await providerKey(s.tts_provider), text.slice(0, 1500), s.language);
+  const audio = await speak(s.tts_provider, s.tts_model, s.tts_voice, await providerKey(s.tts_provider), text.slice(0, 1500), s.language, Number(s.tts_speed ?? 1));
   return new Response(audio, {
     headers: { ...CORS, "Content-Type": "application/octet-stream", "X-Sample-Rate": String(TTS_SAMPLE_RATE) },
   });
@@ -330,9 +330,9 @@ async function adminAuth(req: Request): Promise<string> {
   return hash;
 }
 
-const SETTING_FIELDS: Record<string, "str" | "int" | "bool" | "nstr"> = {
+const SETTING_FIELDS: Record<string, "str" | "int" | "num" | "bool" | "nstr"> = {
   llm_provider: "str", llm_model: "str", stt_provider: "str", stt_model: "str",
-  tts_provider: "str", tts_model: "str", tts_voice: "str", system_prompt: "str",
+  tts_provider: "str", tts_model: "str", tts_voice: "str", tts_speed: "num", system_prompt: "str",
   language: "str", max_history: "int", volume: "int", brightness: "int",
   poll_seconds: "int", auto_update: "bool", pinned_version: "nstr",
 };
@@ -373,6 +373,11 @@ async function admin(path: string, req: Request) {
           const n = Math.round(Number(v));
           if (!Number.isFinite(n)) throw new HttpError(400, `${k} must be a number`);
           upd[k] = n;
+        }
+        else if (t === "num") {
+          const n = Number(v);
+          if (!Number.isFinite(n)) throw new HttpError(400, `${k} must be a number`);
+          upd[k] = Math.round(n * 100) / 100;
         }
         else if (t === "bool") upd[k] = Boolean(v);
         else if (t === "nstr") upd[k] = v ? String(v).trim() : null;
