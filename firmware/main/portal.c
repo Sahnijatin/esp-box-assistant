@@ -16,13 +16,12 @@ static const char *TAG = "portal";
 static httpd_handle_t server;
 static TaskHandle_t dns_task_h;
 static volatile bool dns_run;
-static int dns_sock = -1;
 
 // ---------------- DNS: answer every query with 192.168.4.1 ----------------
 
 static void dns_task(void *arg)
 {
-    dns_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    int dns_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     struct sockaddr_in addr = { .sin_family = AF_INET, .sin_port = htons(53), .sin_addr.s_addr = htonl(INADDR_ANY) };
     if (dns_sock < 0 || bind(dns_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         ESP_LOGE(TAG, "dns bind failed");
@@ -50,7 +49,6 @@ static void dns_task(void *arg)
     }
 done:
     if (dns_sock >= 0) close(dns_sock);
-    dns_sock = -1;
     dns_task_h = NULL;
     vTaskDelete(NULL);
 }
@@ -71,18 +69,29 @@ static void url_decode(char *s)
     *o = 0;
 }
 
+// Escapes into a buffer and sends it as one chunk (SSIDs are at most 32 bytes)
 static void html_escape_append(httpd_req_t *req, const char *s)
 {
-    char out[8];
-    for (; *s; s++) {
+    char out[32 * 6 + 1];
+    size_t o = 0;
+    for (; *s && o + 6 < sizeof(out); s++) {
+        const char *rep = NULL;
         switch (*s) {
-        case '<': httpd_resp_sendstr_chunk(req, "&lt;"); break;
-        case '>': httpd_resp_sendstr_chunk(req, "&gt;"); break;
-        case '&': httpd_resp_sendstr_chunk(req, "&amp;"); break;
-        case '"': httpd_resp_sendstr_chunk(req, "&quot;"); break;
-        default: out[0] = *s; out[1] = 0; httpd_resp_sendstr_chunk(req, out);
+        case '<': rep = "&lt;"; break;
+        case '>': rep = "&gt;"; break;
+        case '&': rep = "&amp;"; break;
+        case '"': rep = "&quot;"; break;
+        }
+        if (rep) {
+            size_t n = strlen(rep);
+            memcpy(out + o, rep, n);
+            o += n;
+        } else {
+            out[o++] = *s;
         }
     }
+    out[o] = 0;
+    if (o) httpd_resp_sendstr_chunk(req, out);
 }
 
 static const char *PAGE_HEAD =
@@ -178,8 +187,10 @@ void portal_start(void)
     httpd_register_uri_handler(server, &save);
     httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, redirect_any);
 
+    // A DNS task from a previous portal_stop() may still be closing its socket (up to 1 s)
+    for (int i = 0; i < 30 && dns_task_h; i++) vTaskDelay(pdMS_TO_TICKS(50));
     dns_run = true;
-    xTaskCreate(dns_task, "dns", 3072, NULL, 4, &dns_task_h);
+    if (!dns_task_h) xTaskCreate(dns_task, "dns", 3072, NULL, 4, &dns_task_h);
 }
 
 void portal_stop(void)

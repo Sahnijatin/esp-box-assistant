@@ -72,11 +72,6 @@ function wrap(f: Font, text: string, size: number, maxW: number): string[] {
   return lines;
 }
 
-// Anything beyond Latin Extended / common punctuation needs server rendering
-export function needsRender(...texts: (string | null | undefined)[]): boolean {
-  return texts.some((t) => t && /[^\u0000-ɏ -⁯₠-⃏]/.test(t));
-}
-
 export type Block = { text: string; size: number; color: string };
 
 // Returns [width u16 LE][height u16 LE] followed by RGB565 LE pixels.

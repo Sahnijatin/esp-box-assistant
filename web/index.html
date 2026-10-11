@@ -207,7 +207,9 @@ esp-web-install-button button{all:unset}
     <section data-tab="account">
       <div class="card">
         <h2>Admin password</h2>
-        <label>New password</label><input type="password" id="newPw" autocomplete="new-password">
+        <p class="sub">Changing it logs out every other browser.</p>
+        <label>Current password</label><input type="password" id="curPw" autocomplete="current-password">
+        <label>New password (at least 10 characters)</label><input type="password" id="newPw" autocomplete="new-password">
         <div class="actions"><button class="btn" id="pwBtn">Change password</button></div>
       </div>
     </section>
@@ -252,7 +254,7 @@ const KEY_PROVIDERS = {
 const TABS = [["boxes","Boxes"],["ai","AI"],["keys","API keys"],["wifi","Wi-Fi"],["updates","Updates"],["history","History"],["account","Account"]];
 
 const $ = (id) => document.getElementById(id);
-let PW = "";
+let TOKEN = "";   // session token from /admin/login (the password itself is never stored)
 let S = null;   // last state
 
 function store(k, v) { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (_) {} }
@@ -271,13 +273,13 @@ function ago(iso) {
 async function call(path, body, raw = false) {
   const res = await fetch(API + path, {
     method: "POST",
-    headers: { Authorization: "Bearer " + PW, "Content-Type": "application/json" },
+    headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
     body: JSON.stringify(body || {}),
   });
   if (raw && res.ok) return res;
   const j = await res.json().catch(() => ({ error: "Bad response (" + res.status + ")" }));
   if (!res.ok || j.error) {
-    if (res.status === 401) { logout(); }
+    if (res.status === 401 && TOKEN) endSession();
     throw new Error(j.error || ("HTTP " + res.status));
   }
   return j;
@@ -289,26 +291,38 @@ async function withBtn(btn, fn) {
 }
 
 // ---------- login ----------
-async function login(pw) {
-  PW = pw;
+async function start(token) {
+  TOKEN = token;
   try {
     await refresh();
-    store("box_pw", pw);
+    store("box_token", token);
     $("login").classList.add("hidden");
     $("app").classList.remove("hidden");
     $("logoutBtn").classList.remove("hidden");
   } catch (e) {
-    PW = "";
-    $("login").classList.remove("hidden");
+    endSession();
     toast(e.message);
   }
 }
-function logout() {
-  PW = ""; store("box_pw", null);
+async function login() {
+  const pw = $("pw").value.trim();
+  if (!pw) return toast("Enter the admin password");
+  try {
+    const { token } = await call("/admin/login", { password: pw });
+    $("pw").value = "";
+    await start(token);
+  } catch (e) { toast(e.message, 5000); }
+}
+function endSession() {
+  TOKEN = ""; store("box_token", null);
   $("app").classList.add("hidden"); $("login").classList.remove("hidden"); $("logoutBtn").classList.add("hidden");
 }
-$("loginBtn").onclick = () => login($("pw").value.trim());
-$("pw").onkeydown = (e) => { if (e.key === "Enter") login($("pw").value.trim()); };
+async function logout() {
+  try { await call("/admin/logout"); } catch (_) {}
+  endSession();
+}
+$("loginBtn").onclick = login;
+$("pw").onkeydown = (e) => { if (e.key === "Enter") login(); };
 $("logoutBtn").onclick = logout;
 
 // ---------- tabs ----------
@@ -402,13 +416,16 @@ function renderLive(s) {
     const st = d.status === "pending" ? `<span class="pill warn">waiting for code</span>`
       : d.status === "blocked" ? `<span class="pill bad">blocked</span>`
       : online ? `<span class="pill ok">online</span>` : `<span class="pill">offline</span>`;
-    const fail = d.ota_failed ? `<div class="m err">Update ${esc(d.ota_failed)} failed on this box and was rolled back. The next build will be tried automatically.</div>` : "";
+    const fail = d.ota_failed ? `<div class="m err">Update ${esc(d.ota_failed)} failed on this box (download failed 3 times or it was rolled back). The next build will be tried automatically.</div>`
+      : d.ota_retry ? `<div class="m">Retrying the update at the next check-in.</div>` : "";
+    const conflict = d.token_conflict && d.status === "active" ? `<div class="m err">A box with this ID checked in ${ago(d.token_conflict)} with a different key, so it was not let in. If you reset or reflashed this box, remove it and pair it again. If not, someone may be imitating it. <button class="btn ghost sm" data-dismiss="${d.id}">Dismiss</button></div>` : "";
     return `<div class="item"><span class="dot ${dot}"></span><div class="grow">
       <div class="t">${esc(d.name)} ${st}</div>
       <div class="m">${[d.fw_version && "v" + d.fw_version, d.ssid && d.ssid + (d.rssi ? " (" + d.rssi + " dBm)" : ""), d.ip, "seen " + ago(d.last_seen)].filter(Boolean).map(esc).join(" · ")}</div>
-      <div class="m">ID ${esc(d.id)}</div>${fail}</div>
+      <div class="m">ID ${esc(d.id)}</div>${fail}${conflict}</div>
       <div style="display:flex;flex-direction:column;gap:6px">
         <button class="btn ghost sm" data-rename="${d.id}">Rename</button>
+        ${d.ota_failed ? `<button class="btn ghost sm" data-retry="${d.id}">Retry update</button>` : ""}
         ${d.status === "blocked" ? `<button class="btn ghost sm" data-unblock="${d.id}">Unblock</button>` : d.status === "active" ? `<button class="btn danger sm" data-block="${d.id}">Block</button>` : ""}
         <button class="btn danger sm" data-remove="${d.id}">Remove</button>
       </div></div>`;
@@ -445,12 +462,14 @@ $("pairBtn").onclick = (e) => withBtn(e.target, async () => {
   await refresh();
 });
 
-$("devList").onclick = async (e) => {
+$("devList").onclick = (e) => {
   const t = e.target, d = t.dataset;
-  if (d.rename) { const n = prompt("New name"); if (n) { await call("/admin/device", { id: d.rename, name: n }); refresh(); } }
-  if (d.block && confirm("Block this box? It stops answering until unblocked.")) { await call("/admin/device", { id: d.block, status: "blocked" }); refresh(); }
-  if (d.unblock) { await call("/admin/device", { id: d.unblock, status: "active" }); refresh(); }
-  if (d.remove && confirm("Remove this box? It will show a new pairing code.")) { await call("/admin/device/delete", { id: d.remove }); refresh(); }
+  if (d.rename) { const n = prompt("New name"); if (n) withBtn(t, async () => { await call("/admin/device", { id: d.rename, name: n }); await refresh(); }); }
+  if (d.block && confirm("Block this box? It stops answering until unblocked.")) withBtn(t, async () => { await call("/admin/device", { id: d.block, status: "blocked" }); await refresh(); });
+  if (d.retry) withBtn(t, async () => { await call("/admin/device", { id: d.retry, clear_ota_failed: true }); toast("The box retries at its next check-in."); await refresh(); });
+  if (d.dismiss) withBtn(t, async () => { await call("/admin/device", { id: d.dismiss, clear_conflict: true }); await refresh(); });
+  if (d.unblock) withBtn(t, async () => { await call("/admin/device", { id: d.unblock, status: "active" }); await refresh(); });
+  if (d.remove && confirm("Remove this box? It will show a new pairing code.")) withBtn(t, async () => { await call("/admin/device/delete", { id: d.remove }); await refresh(); });
 };
 
 $("saveAi").onclick = (e) => withBtn(e.target, async () => {
@@ -504,7 +523,7 @@ $("wAdd").onclick = (e) => withBtn(e.target, async () => {
 });
 $("wifiList").onclick = async (e) => {
   const s = e.target.dataset.wdel;
-  if (s && confirm(`Remove ${s}?`)) { await call("/admin/wifi/delete", { ssid: s }); refresh(); }
+  if (s && confirm(`Remove ${s}?`)) await withBtn(e.target, async () => { await call("/admin/wifi/delete", { ssid: s }); await refresh(); });
 };
 
 $("saveUpd").onclick = (e) => withBtn(e.target, async () => {
@@ -524,17 +543,17 @@ $("flashPrep").onclick = (e) => withBtn(e.target, async () => {
 $("refreshHist").onclick = (e) => withBtn(e.target, () => refresh(false));
 
 $("pwBtn").onclick = (e) => withBtn(e.target, async () => {
-  const p = $("newPw").value;
-  await call("/admin/password", { password: p });
-  PW = p; store("box_pw", p); $("newPw").value = "";
-  toast("Password changed");
+  await call("/admin/password", { current: $("curPw").value, password: $("newPw").value });
+  $("curPw").value = ""; $("newPw").value = "";
+  toast("Password changed. Other browsers are logged out.");
 });
 
 // auto refresh boxes and history every 20 s while visible
-setInterval(() => { if (PW && !document.hidden) refresh(false).catch(() => {}); }, 20000);
+setInterval(() => { if (TOKEN && !document.hidden) refresh(false).catch(() => {}); }, 20000);
 
-const saved = load("box_pw");
-if (saved) login(saved);
+store("box_pw", null);   // older versions kept the password itself here
+const saved = load("box_token");
+if (saved) start(saved);
 </script>
 </body>
 </html>

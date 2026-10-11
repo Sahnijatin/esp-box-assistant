@@ -27,6 +27,8 @@ static const char *TAG = "cloud";
 static char dev_id[13];
 static char token[65];
 static char ota_failed[33];
+static char ota_tried[33];   // version of the last update attempt and how often it failed
+static int ota_tries;
 static volatile bool paired;
 static TaskHandle_t task_h;
 
@@ -57,13 +59,17 @@ static void load_identity(void)
     }
     sz = sizeof(ota_failed);
     if (nvs_get_str(h, "ota_fail", ota_failed, &sz) != ESP_OK) ota_failed[0] = 0;
+    char ack[33];
+    sz = sizeof(ack);
+    if (nvs_get_str(h, "ota_ack", ack, &sz) != ESP_OK) ack[0] = 0;
     nvs_close(h);
 
     // If the last update was rolled back, report that version so it isn't offered again
+    // (unless the setup page already said to retry it)
     const esp_partition_t *inv = esp_ota_get_last_invalid_partition();
     esp_app_desc_t d;
     if (inv && esp_ota_get_partition_description(inv, &d) == ESP_OK &&
-        strcmp(d.version, esp_app_get_description()->version) != 0) {
+        strcmp(d.version, esp_app_get_description()->version) != 0 && strcmp(d.version, ack) != 0) {
         strlcpy(ota_failed, d.version, sizeof(ota_failed));
         ESP_LOGW(TAG, "previous update %s was rolled back", ota_failed);
     }
@@ -105,11 +111,17 @@ static void read_body(esp_http_client_handle_t c, resp_t *r)
     int cap = 4096;
     r->body = malloc(cap + 1);
     r->len = 0;
+    if (!r->body) {
+        r->body = strdup("");
+        return;
+    }
     for (;;) {
         if (r->len == cap) {
             if (cap >= 32768) break;
+            char *nb = realloc(r->body, cap * 2 + 1);
+            if (!nb) break;
+            r->body = nb;
             cap *= 2;
-            r->body = realloc(r->body, cap + 1);
         }
         int n = esp_http_client_read(c, r->body + r->len, cap - r->len);
         if (n <= 0) break;
@@ -167,7 +179,9 @@ bool cloud_ask(const uint8_t *wav, size_t len, char **question, char **answer, c
         if (e && *e) {
             *error = dupstr(e);
         } else if (r.status != 200 || !a) {
-            *error = dupstr(r.status == 401 || r.status == 403 ? "This box isn't paired." : "Server error.");
+            bool unpaired = r.status == 401 || r.status == 403;
+            *error = dupstr(unpaired ? "This box isn't paired." : "Server error.");
+            if (unpaired) cloud_poll_now();   // check-in shows the pairing code or blocked state
         } else {
             const char *sp = cJSON_GetStringValue(cJSON_GetObjectItem(j, "speech"));
             *answer = dupstr(a);
@@ -241,8 +255,8 @@ bool cloud_speak(const char *text, volatile bool *stop)
     if (esp_http_client_open(c, blen) == ESP_OK && write_all(c, (uint8_t *)body, blen)) {
         esp_http_client_fetch_headers(c);
         int status = esp_http_client_get_status_code(c);
-        if (status == 200) {
-            uint8_t *buf = heap_caps_malloc(4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        uint8_t *buf = status == 200 ? heap_caps_malloc(4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) : NULL;
+        if (buf) {
             int carry = -1;    // odd byte left from the previous chunk
             audio_play_begin(TTS_SAMPLE_RATE);
             for (;;) {
@@ -258,7 +272,7 @@ bool cloud_speak(const char *text, volatile bool *stop)
             audio_play_end();
             free(buf);
             ok = true;
-        } else {
+        } else if (status != 200) {
             resp_t r;
             read_body(c, &r);
             ESP_LOGW(TAG, "tts failed %d: %s", status, r.body);
@@ -302,13 +316,33 @@ static int apply_config(const cJSON *cfg)
     if (cJSON_IsNumber(v = cJSON_GetObjectItem(cfg, "poll_seconds"))) poll = v->valueint;
     wifi_mgr_set_cloud_list(cJSON_GetObjectItem(cfg, "wifi"));
 
+    // "Retry update" on the setup page: forget the failed version
+    if (cJSON_IsTrue(cJSON_GetObjectItem(cfg, "clear_ota_failed")) && ota_failed[0]) {
+        ESP_LOGI(TAG, "retrying update %s", ota_failed);
+        nvs_handle_t h;
+        if (nvs_open("dev", NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_str(h, "ota_ack", ota_failed);
+            nvs_erase_key(h, "ota_fail");
+            nvs_commit(h);
+            nvs_close(h);
+        }
+        ota_failed[0] = 0;
+        ota_tried[0] = 0;
+        ota_tries = 0;
+    }
+
     const cJSON *up = cJSON_GetObjectItem(cfg, "update");
     const char *ver = cJSON_GetStringValue(cJSON_GetObjectItem(up, "version"));
     const char *url = cJSON_GetStringValue(cJSON_GetObjectItem(up, "url"));
     if (ver && url && strcmp(ver, ota_failed) != 0) {
         if (assistant_busy()) return 5;   // try again once the conversation is over
         ESP_LOGI(TAG, "update available: %s", ver);
-        if (!ota_run(url, ver)) {           // only returns on failure
+        // A Wi-Fi blip shouldn't rule a build out: give up on it after 3 failed attempts
+        if (strcmp(ota_tried, ver) != 0) {
+            strlcpy(ota_tried, ver, sizeof(ota_tried));
+            ota_tries = 0;
+        }
+        if (!ota_run(url, ver) && ++ota_tries >= 3) {   // ota_run only returns on failure
             strlcpy(ota_failed, ver, sizeof(ota_failed));
             nvs_handle_t h;
             if (nvs_open("dev", NVS_READWRITE, &h) == ESP_OK) {
@@ -358,6 +392,12 @@ static void cloud_task(void *arg)
                 ui_show_pairing(code ? code : "------");
                 ui_set_mode(UI_BLOCKED, "Pair this box from the setup page");
                 wait_s = 4;
+            } else if (strcmp(status, "token_mismatch") == 0) {
+                // This box's token changed (e.g. flash erased) but the server still has it paired
+                paired = false;
+                ui_hide_pairing();
+                ui_set_mode(UI_BLOCKED, "Box was reset: remove it on the setup page");
+                wait_s = 30;
             } else if (strcmp(status, "blocked") == 0) {
                 paired = false;
                 ui_hide_pairing();
