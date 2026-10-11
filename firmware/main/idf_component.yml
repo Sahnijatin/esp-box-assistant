@@ -1,0 +1,4 @@
+dependencies:
+  idf: ">=5.4"
+  espressif/esp-box-3: "^3.1"
+  lvgl/lvgl: "~9.3.0"
