@@ -145,9 +145,11 @@ static char *dupstr(const char *s) { return strdup(s ? s : ""); }
 
 // ---------------- ask / speak ----------------
 
-bool cloud_ask(const uint8_t *wav, size_t len, char **question, char **answer, char **error)
+bool cloud_ask(const uint8_t *wav, size_t len, char **question, char **answer, char **speech,
+               bool *render, char **error)
 {
-    *question = *answer = *error = NULL;
+    *question = *answer = *speech = *error = NULL;
+    *render = false;
     resp_t r;
     if (!post("/device/ask", "audio/wav", NULL, 0, wav, len, 60000, &r)) {
         *error = dupstr("Couldn't reach the server.");
@@ -167,12 +169,61 @@ bool cloud_ask(const uint8_t *wav, size_t len, char **question, char **answer, c
         } else if (r.status != 200 || !a) {
             *error = dupstr(r.status == 401 || r.status == 403 ? "This box isn't paired." : "Server error.");
         } else {
+            const char *sp = cJSON_GetStringValue(cJSON_GetObjectItem(j, "speech"));
             *answer = dupstr(a);
+            *speech = dupstr(sp && *sp ? sp : a);
+            *render = cJSON_IsTrue(cJSON_GetObjectItem(j, "render"));
             ok = true;
         }
         cJSON_Delete(j);
     }
     free(r.body);
+    return ok;
+}
+
+static bool read_exact(esp_http_client_handle_t c, uint8_t *dst, int len)
+{
+    while (len > 0) {
+        int n = esp_http_client_read(c, (char *)dst, len);
+        if (n <= 0) return false;
+        dst += n;
+        len -= n;
+    }
+    return true;
+}
+
+bool cloud_render(const char *question, const char *answer, uint8_t **rgb565, int *w, int *h)
+{
+    *rgb565 = NULL;
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddStringToObject(j, "question", question ? question : "");
+    cJSON_AddStringToObject(j, "answer", answer ? answer : "");
+    cJSON_AddNumberToObject(j, "width", 300);
+    char *body = cJSON_PrintUnformatted(j);
+    cJSON_Delete(j);
+
+    esp_http_client_handle_t c = client_for("/device/render", 20000);
+    esp_http_client_set_header(c, "Content-Type", "application/json");
+    bool ok = false;
+    size_t blen = strlen(body);
+    uint8_t hdr[4];
+    if (esp_http_client_open(c, blen) == ESP_OK && write_all(c, (uint8_t *)body, blen)) {
+        esp_http_client_fetch_headers(c);
+        if (esp_http_client_get_status_code(c) == 200 && read_exact(c, hdr, 4)) {
+            *w = hdr[0] | (hdr[1] << 8);
+            *h = hdr[2] | (hdr[3] << 8);
+            size_t sz = (size_t)*w * *h * 2;
+            if (*w > 0 && *w <= 320 && *h > 0 && *h <= 1200) {
+                *rgb565 = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
+                if (*rgb565 && read_exact(c, *rgb565, sz)) ok = true;
+            }
+        }
+    }
+    if (!ok && *rgb565) { free(*rgb565); *rgb565 = NULL; }
+    if (!ok) ESP_LOGW(TAG, "render failed");
+    esp_http_client_close(c);
+    esp_http_client_cleanup(c);
+    free(body);
     return ok;
 }
 
