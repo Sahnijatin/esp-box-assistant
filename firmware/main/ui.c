@@ -2,6 +2,7 @@
 // Every public function takes the display lock, so they can be called from any task.
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "bsp/esp-bsp.h"
 #include "lvgl.h"
@@ -18,7 +19,9 @@
 #define C_GRAY    0x4b5563
 
 static lv_obj_t *wifi_lbl, *ver_lbl;
-static lv_obj_t *chat, *q_lbl, *a_lbl;
+static lv_obj_t *chat, *q_lbl, *a_lbl, *r_img;
+static lv_image_dsc_t r_dsc;
+static uint8_t *r_buf;
 static lv_obj_t *talk_btn, *talk_lbl, *level_bar, *hint_lbl;
 static lv_obj_t *pair_panel, *pair_code_lbl;
 static lv_obj_t *ota_panel, *ota_lbl, *ota_bar;
@@ -143,6 +146,8 @@ static void build_main(lv_obj_t *scr)
     a_lbl = label(chat, &lv_font_montserrat_16, C_TEXT, "Hi! Tap the button and ask me anything.");
     lv_obj_set_width(a_lbl, lv_pct(100));
     lv_label_set_long_mode(a_lbl, LV_LABEL_LONG_WRAP);
+    r_img = lv_image_create(chat);
+    lv_obj_add_flag(r_img, LV_OBJ_FLAG_HIDDEN);
 
     // hint + level
     hint_lbl = label(scr, &lv_font_montserrat_14, C_MUTED, "");
@@ -309,9 +314,44 @@ void ui_set_level(int percent)
     UNLOCK();
 }
 
+// Back to text labels: drop any rendered bitmap
+static void clear_rendered(void)
+{
+    if (!r_buf) return;
+    lv_obj_add_flag(r_img, LV_OBJ_FLAG_HIDDEN);
+    lv_image_set_src(r_img, NULL);
+    lv_image_cache_drop(&r_dsc);
+    free(r_buf);
+    r_buf = NULL;
+    lv_obj_clear_flag(q_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(a_lbl, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ui_show_rendered(uint8_t *rgb565, int w, int h)
+{
+    LOCK();
+    clear_rendered();
+    r_buf = rgb565;
+    memset(&r_dsc, 0, sizeof(r_dsc));
+    r_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    r_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+    r_dsc.header.w = w;
+    r_dsc.header.h = h;
+    r_dsc.header.stride = w * 2;
+    r_dsc.data_size = w * h * 2;
+    r_dsc.data = rgb565;
+    lv_image_set_src(r_img, &r_dsc);
+    lv_obj_add_flag(q_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(a_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(r_img, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_scroll_to_y(chat, 0, LV_ANIM_OFF);
+    UNLOCK();
+}
+
 void ui_show_question(const char *text)
 {
     LOCK();
+    clear_rendered();
     if (text && *text) lv_label_set_text_fmt(q_lbl, "You: %s", text);
     else lv_label_set_text(q_lbl, "");
     UNLOCK();
@@ -320,6 +360,7 @@ void ui_show_question(const char *text)
 void ui_show_answer(const char *text)
 {
     LOCK();
+    clear_rendered();
     lv_label_set_text(a_lbl, text ? text : "");
     lv_obj_scroll_to_y(chat, 0, LV_ANIM_OFF);
     UNLOCK();
