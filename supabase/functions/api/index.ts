@@ -1,0 +1,398 @@
+// ESP Box Assistant API (single Supabase Edge Function)
+//
+//   /device/*  called by the box      auth: X-Device-Id + X-Device-Token (paired via 6-digit code)
+//   /admin/*   called by setup page   auth: Bearer <admin password>
+//   /ci/*      called by GitHub CI    auth: GitHub Actions OIDC token (no stored secrets)
+
+import { createClient } from "npm:@supabase/supabase-js@2.45.4";
+import { createRemoteJWKSet, jwtVerify } from "npm:jose@5.9.6";
+import { chat, Msg, speak, transcribe, TTS_SAMPLE_RATE } from "./providers.ts";
+
+const ALLOWED_REPO = "Sahnijatin/esp-box-assistant";
+const OIDC_AUDIENCE = "esp-box-assistant";
+
+const db = createClient(
+  Deno.env.get("SUPABASE_URL")!,
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+  { auth: { persistSession: false } },
+);
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, content-type, x-device-id, x-device-token",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+};
+
+const PROVIDERS = ["openai", "anthropic", "gemini", "groq", "openrouter", "elevenlabs"];
+
+class HttpError extends Error {
+  constructor(public status: number, message: string) { super(message); }
+}
+
+function json(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status, headers: { ...CORS, "Content-Type": "application/json" },
+  });
+}
+
+async function sha256hex(s: string): Promise<string> {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function pairCode(): string {
+  const n = crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000;
+  return n.toString().padStart(6, "0");
+}
+
+// deno-lint-ignore no-explicit-any
+async function must(p: PromiseLike<{ data: any; error: any }>): Promise<any> {
+  const { data, error } = await p;
+  if (error) throw new HttpError(500, error.message);
+  return data;
+}
+
+async function getSettings() {
+  return await must(db.from("settings").select("*").eq("id", 1).single());
+}
+
+async function providerKey(provider: string): Promise<string> {
+  const key = await must(db.rpc("get_provider_key", { p_provider: provider }));
+  if (!key) throw new HttpError(400, `No API key saved for ${provider}. Add it on the setup page.`);
+  return key as string;
+}
+
+// ======================= device =======================
+
+async function deviceAuth(req: Request) {
+  const id = req.headers.get("x-device-id") ?? "";
+  const token = req.headers.get("x-device-token") ?? "";
+  const row = await must(db.from("devices").select("*").eq("id", id).maybeSingle());
+  if (!row || row.token_hash !== await sha256hex(token)) throw new HttpError(401, "unknown device");
+  if (row.status !== "active") throw new HttpError(403, `device ${row.status}`);
+  return row;
+}
+
+async function deviceConfig(row: any) {
+  const s = await getSettings();
+  const wifi = await must(db.from("wifi_networks").select("ssid,password,priority").order("priority", { ascending: false }));
+  let update = null;
+  if (s.auto_update) {
+    let target = s.pinned_version as string | null;
+    if (!target) {
+      const latest = await must(db.from("firmware_releases").select("version").order("created_at", { ascending: false }).limit(1));
+      target = latest[0]?.version ?? null;
+    }
+    if (target && target !== row.fw_version && target !== row.ota_failed) {
+      const rel = await must(db.from("firmware_releases").select("*").eq("version", target).maybeSingle());
+      if (rel) {
+        const { data } = await db.storage.from("firmware").createSignedUrl(rel.ota_path, 900);
+        if (data?.signedUrl) update = { version: rel.version, url: data.signedUrl, size: rel.size };
+      }
+    }
+  }
+  return {
+    volume: s.volume, brightness: s.brightness, poll_seconds: s.poll_seconds,
+    wifi, update,
+  };
+}
+
+async function deviceHello(req: Request) {
+  const b = await req.json();
+  const id = String(b.id ?? "").toLowerCase();
+  const token = String(b.token ?? "");
+  if (!/^[0-9a-f]{12}$/.test(id) || token.length < 32) throw new HttpError(400, "bad id/token");
+  const hash = await sha256hex(token);
+  const telemetry = {
+    fw_version: b.fw ?? null, ip: b.ip ?? null, ssid: b.ssid ?? null,
+    rssi: Number.isFinite(b.rssi) ? b.rssi : null,
+    free_heap: Number.isFinite(b.heap) ? b.heap : null,
+    ota_failed: b.ota_failed || null,
+    last_seen: new Date().toISOString(),
+  };
+  const newPairing = () => ({
+    pair_code: pairCode(),
+    pair_expires: new Date(Date.now() + 30 * 60_000).toISOString(),
+  });
+
+  let row = await must(db.from("devices").select("*").eq("id", id).maybeSingle());
+  if (!row) {
+    const p = newPairing();
+    await must(db.from("devices").insert({ id, token_hash: hash, status: "pending", ...p, ...telemetry }));
+    return json({ status: "pending", pair_code: p.pair_code });
+  }
+  if (row.status === "blocked") return json({ status: "blocked" }, 403);
+  if (row.token_hash !== hash) {
+    // Box was wiped and made a new token: it has to be paired again.
+    const p = newPairing();
+    await must(db.from("devices").update({ token_hash: hash, status: "pending", ...p, ...telemetry }).eq("id", id));
+    return json({ status: "pending", pair_code: p.pair_code });
+  }
+  if (row.status === "pending") {
+    let code = row.pair_code;
+    const upd: any = { ...telemetry };
+    if (!code || new Date(row.pair_expires) < new Date()) {
+      Object.assign(upd, newPairing());
+      code = upd.pair_code;
+    }
+    await must(db.from("devices").update(upd).eq("id", id));
+    return json({ status: "pending", pair_code: code });
+  }
+  row = { ...row, ...telemetry };
+  await must(db.from("devices").update(telemetry).eq("id", id));
+  return json({ status: "active", name: row.name, config: await deviceConfig(row) });
+}
+
+async function deviceAsk(req: Request) {
+  const dev = await deviceAuth(req);
+  const wav = new Uint8Array(await req.arrayBuffer());
+  if (wav.length < 8000) return json({ error: "Recording too short" });
+  const s = await getSettings();
+  const t0 = Date.now();
+  let question = "";
+  try {
+    question = await transcribe(s.stt_provider, s.stt_model, await providerKey(s.stt_provider), wav, s.language);
+    if (!question) return json({ question: "", answer: "", error: "I didn't catch that." });
+
+    const since = new Date(Date.now() - 10 * 60_000).toISOString();
+    const hist = s.max_history > 0
+      ? await must(db.from("conversations").select("question,answer")
+        .eq("device_id", dev.id).is("error", null).gte("created_at", since)
+        .order("created_at", { ascending: false }).limit(s.max_history))
+      : [];
+    const messages: Msg[] = [];
+    for (const h of hist.reverse()) {
+      messages.push({ role: "user", content: h.question }, { role: "assistant", content: h.answer });
+    }
+    messages.push({ role: "user", content: question });
+
+    const answer = await chat(s.llm_provider, s.llm_model, await providerKey(s.llm_provider), s.system_prompt, messages);
+    await db.from("conversations").insert({
+      device_id: dev.id, question, answer, llm_provider: s.llm_provider, llm_model: s.llm_model,
+      latency_ms: Date.now() - t0,
+    });
+    return json({ question, answer });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await db.from("conversations").insert({
+      device_id: dev.id, question, error: msg.slice(0, 1000), llm_provider: s.llm_provider,
+      llm_model: s.llm_model, latency_ms: Date.now() - t0,
+    });
+    return json({ question, error: msg.slice(0, 200) });
+  }
+}
+
+async function ttsResponse(text: string) {
+  const s = await getSettings();
+  const audio = await speak(s.tts_provider, s.tts_model, s.tts_voice, await providerKey(s.tts_provider), text.slice(0, 1500));
+  return new Response(audio, {
+    headers: { ...CORS, "Content-Type": "application/octet-stream", "X-Sample-Rate": String(TTS_SAMPLE_RATE) },
+  });
+}
+
+async function deviceTts(req: Request) {
+  await deviceAuth(req);
+  const { text } = await req.json();
+  if (!text) throw new HttpError(400, "no text");
+  return await ttsResponse(String(text));
+}
+
+// ======================= admin =======================
+
+async function adminAuth(req: Request) {
+  const pw = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
+  if (!pw) throw new HttpError(401, "password required");
+  const ok = await must(db.rpc("verify_admin", { p_password: pw }));
+  if (!ok) throw new HttpError(401, "wrong password");
+}
+
+const SETTING_FIELDS: Record<string, "str" | "int" | "bool" | "nstr"> = {
+  llm_provider: "str", llm_model: "str", stt_provider: "str", stt_model: "str",
+  tts_provider: "str", tts_model: "str", tts_voice: "str", system_prompt: "str",
+  language: "str", max_history: "int", volume: "int", brightness: "int",
+  poll_seconds: "int", auto_update: "bool", pinned_version: "nstr",
+};
+
+async function admin(path: string, req: Request) {
+  await adminAuth(req);
+  const body = req.method === "POST" ? await req.json().catch(() => ({})) : {};
+
+  switch (path) {
+    case "/admin/state": {
+      const [settings, keys, wifi, devices, releases, conversations, builds] = await Promise.all([
+        getSettings(),
+        must(db.from("provider_keys").select("provider,last4,updated_at")),
+        must(db.from("wifi_networks").select("*").order("priority", { ascending: false })),
+        must(db.from("devices").select("id,name,status,pair_code,fw_version,ota_failed,ip,ssid,rssi,free_heap,last_seen,created_at").order("created_at")),
+        must(db.from("firmware_releases").select("*").order("created_at", { ascending: false }).limit(20)),
+        must(db.from("conversations").select("*").order("created_at", { ascending: false }).limit(40)),
+        must(db.from("build_logs").select("*").order("created_at", { ascending: false }).limit(5)),
+      ]);
+      return json({
+        settings,
+        keys: keys.filter((k: any) => k.last4 !== ""),
+        wifi: wifi.map((w: any) => ({ ...w, password: w.password ? "••••••" : "" })),
+        devices, releases, conversations,
+        builds: builds.map((b: any) => ({ ...b, log: (b.log ?? "").slice(-6000) })),
+      });
+    }
+    case "/admin/settings": {
+      const upd: Record<string, unknown> = { updated_at: new Date().toISOString() };
+      for (const [k, t] of Object.entries(SETTING_FIELDS)) {
+        if (!(k in body)) continue;
+        const v = body[k];
+        if (t === "int") upd[k] = Math.round(Number(v));
+        else if (t === "bool") upd[k] = Boolean(v);
+        else if (t === "nstr") upd[k] = v ? String(v).trim() : null;
+        else upd[k] = String(v).trim();
+      }
+      return json(await must(db.from("settings").update(upd).eq("id", 1).select().single()));
+    }
+    case "/admin/key": {
+      const provider = String(body.provider ?? "");
+      if (!PROVIDERS.includes(provider)) throw new HttpError(400, "unknown provider");
+      const key = String(body.key ?? "").trim();
+      if (key.length > 400) throw new HttpError(400, "key too long");
+      await must(db.rpc("set_provider_key", { p_provider: provider, p_key: key }));
+      return json({ ok: true });
+    }
+    case "/admin/wifi": {
+      const ssid = String(body.ssid ?? "").trim();
+      if (!ssid || ssid.length > 32) throw new HttpError(400, "SSID must be 1-32 characters");
+      const row: any = { ssid, priority: Math.round(Number(body.priority ?? 0)) };
+      const pw = body.password;
+      if (typeof pw === "string" && pw !== "••••••") {
+        if (pw.length > 0 && (pw.length < 8 || pw.length > 63)) throw new HttpError(400, "Wi-Fi password must be 8-63 characters (or empty for open networks)");
+        row.password = pw;
+      }
+      await must(db.from("wifi_networks").upsert(row, { onConflict: "ssid" }));
+      return json({ ok: true });
+    }
+    case "/admin/wifi/delete": {
+      await must(db.from("wifi_networks").delete().eq("ssid", String(body.ssid ?? "")));
+      return json({ ok: true });
+    }
+    case "/admin/pair": {
+      const code = String(body.code ?? "").replace(/\D/g, "");
+      const rows = await must(db.from("devices").select("id,pair_expires").eq("status", "pending").eq("pair_code", code));
+      const row = rows.find((r: any) => new Date(r.pair_expires) > new Date());
+      if (!row) throw new HttpError(404, "No box is showing that code. Check the screen and try again.");
+      const upd: any = { status: "active", pair_code: null, pair_expires: null };
+      if (body.name) upd.name = String(body.name).slice(0, 40);
+      await must(db.from("devices").update(upd).eq("id", row.id));
+      return json({ ok: true, id: row.id });
+    }
+    case "/admin/device": {
+      const upd: any = {};
+      if (body.name) upd.name = String(body.name).slice(0, 40);
+      if (["active", "blocked"].includes(body.status)) upd.status = body.status;
+      if (body.clear_ota_failed) upd.ota_failed = null;
+      await must(db.from("devices").update(upd).eq("id", String(body.id)));
+      return json({ ok: true });
+    }
+    case "/admin/device/delete": {
+      await must(db.from("devices").delete().eq("id", String(body.id)));
+      return json({ ok: true });
+    }
+    case "/admin/test": {
+      const s = await getSettings();
+      const t0 = Date.now();
+      const answer = await chat(s.llm_provider, s.llm_model, await providerKey(s.llm_provider), s.system_prompt,
+        [{ role: "user", content: String(body.text || "Say hello in one sentence.") }]);
+      return json({ answer, ms: Date.now() - t0 });
+    }
+    case "/admin/tts": {
+      return await ttsResponse(String(body.text || "Hello, I am your ESP box assistant."));
+    }
+    case "/admin/flash": {
+      const rels = await must(db.from("firmware_releases").select("*").not("factory_path", "is", null)
+        .order("created_at", { ascending: false }).limit(1));
+      const rel = rels[0];
+      if (!rel) throw new HttpError(404, "No firmware has been built yet.");
+      const { data, error } = await db.storage.from("firmware").createSignedUrl(rel.factory_path, 3600);
+      if (error) throw new HttpError(500, error.message);
+      return json({
+        version: rel.version,
+        manifest: {
+          name: "ESP Box Assistant", version: rel.version, new_install_prompt_erase: true,
+          builds: [{ chipFamily: "ESP32-S3", parts: [{ path: data.signedUrl, offset: 0 }] }],
+        },
+      });
+    }
+    case "/admin/password": {
+      const pw = String(body.password ?? "");
+      if (pw.length < 10) throw new HttpError(400, "Use at least 10 characters");
+      await must(db.rpc("set_admin_password", { p_password: pw }));
+      return json({ ok: true });
+    }
+  }
+  throw new HttpError(404, "not found");
+}
+
+// ======================= CI (GitHub Actions OIDC) =======================
+
+const JWKS = createRemoteJWKSet(new URL("https://token.actions.githubusercontent.com/.well-known/jwks"));
+const VERSION_RE = /^[0-9A-Za-z._-]{1,40}$/;
+
+async function ci(path: string, req: Request) {
+  const token = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
+  let claims: any;
+  try {
+    ({ payload: claims } = await jwtVerify(token, JWKS, {
+      issuer: "https://token.actions.githubusercontent.com", audience: OIDC_AUDIENCE,
+    }));
+  } catch (_) {
+    throw new HttpError(401, "invalid CI token");
+  }
+  if (claims.repository !== ALLOWED_REPO) throw new HttpError(403, "repo not allowed");
+  const body = await req.json();
+  const onMain = claims.ref === "refs/heads/main";
+
+  if (path === "/ci/log") {
+    await must(db.from("build_logs").insert({
+      run_id: String(body.run_id ?? ""), version: String(body.version ?? ""),
+      status: String(body.status ?? ""), log: String(body.log ?? "").slice(-20000),
+    }));
+    return json({ ok: true });
+  }
+  if (!onMain) throw new HttpError(403, "only main branch can publish firmware");
+  const version = String(body.version ?? "");
+  if (!VERSION_RE.test(version)) throw new HttpError(400, "bad version");
+
+  if (path === "/ci/upload-url") {
+    const file = String(body.file ?? "");
+    if (!["ota.bin", "factory.bin"].includes(file)) throw new HttpError(400, "bad file");
+    const { data, error } = await db.storage.from("firmware").createSignedUploadUrl(`${version}/${file}`, { upsert: true });
+    if (error) throw new HttpError(500, error.message);
+    return json({ url: data.signedUrl });
+  }
+  if (path === "/ci/release") {
+    await must(db.from("firmware_releases").upsert({
+      version, git_sha: String(body.git_sha ?? ""), ota_path: `${version}/ota.bin`,
+      factory_path: `${version}/factory.bin`, size: Number(body.size) || null,
+      notes: String(body.notes ?? "").slice(0, 500),
+    }, { onConflict: "version" }));
+    return json({ ok: true });
+  }
+  throw new HttpError(404, "not found");
+}
+
+// ======================= router =======================
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
+  const path = new URL(req.url).pathname.replace(/^\/(functions\/v1\/)?api/, "") || "/";
+  try {
+    if (path === "/device/hello") return await deviceHello(req);
+    if (path === "/device/ask") return await deviceAsk(req);
+    if (path === "/device/tts") return await deviceTts(req);
+    if (path.startsWith("/admin/")) return await admin(path, req);
+    if (path.startsWith("/ci/")) return await ci(path, req);
+    if (path === "/health") return json({ ok: true });
+    throw new HttpError(404, "not found");
+  } catch (e) {
+    if (e instanceof HttpError) return json({ error: e.message }, e.status);
+    console.error(e);
+    return json({ error: e instanceof Error ? e.message : String(e) }, 500);
+  }
+});
