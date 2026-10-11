@@ -1,0 +1,58 @@
+name: firmware
+
+on:
+  push:
+    branches: [main]
+    paths: ["firmware/**", ".github/workflows/firmware.yml", ".github/scripts/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # GitHub OIDC token proves to the backend that this repo is publishing
+
+concurrency:
+  group: firmware
+  cancel-in-progress: false
+
+env:
+  API: https://sxzeggllkdirvfnravfe.supabase.co/functions/v1/api
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.4.2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version
+        shell: bash
+        run: |
+          VERSION="0.1.${GITHUB_RUN_NUMBER}"
+          echo "$VERSION" > firmware/version.txt
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          cd firmware
+          set -o pipefail
+          idf.py build 2>&1 | tee ../build.log
+          cd build
+          python -m esptool --chip esp32s3 merge_bin -o factory.bin @flash_args
+
+      - name: Publish to backend
+        shell: bash
+        run: |
+          python3 .github/scripts/publish.py release \
+            --version "$VERSION" \
+            --ota firmware/build/esp_box_assistant.bin \
+            --factory firmware/build/factory.bin \
+            --sha "$GITHUB_SHA" \
+            --notes "$(git log -1 --pretty=%s 2>/dev/null || echo '')"
+
+      - name: Report failure
+        if: failure()
+        shell: bash
+        run: |
+          python3 .github/scripts/publish.py log --version "$VERSION" --status failure --log build.log || true
