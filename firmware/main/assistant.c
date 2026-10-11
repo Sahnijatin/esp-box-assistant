@@ -53,6 +53,7 @@ static void handle_question(void)
     stop_flag = false;
     ui_set_mode(UI_LISTENING, "Ask your question");
     ui_show_question("");
+    ui_show_answer("");
     audio_beep(880, 80);
     size_t n = audio_record((int16_t *)(rec + 44), REC_SAMPLES, &stop_flag, level);
     if (n == 0) {
@@ -66,27 +67,37 @@ static void handle_question(void)
     state = ST_THINKING;
     ui_set_mode(UI_THINKING, NULL);
     audio_wav_header(rec, n, REC_SAMPLE_RATE);
-    char *q = NULL, *a = NULL, *err = NULL;
-    bool ok = cloud_ask(rec, 44 + n * 2, &q, &a, &err);
-    ui_show_question(q);
+    char *q = NULL, *a = NULL, *sp = NULL, *err = NULL;
+    bool render = false;
+    bool ok = cloud_ask(rec, 44 + n * 2, &q, &a, &sp, &render, &err);
     if (!ok) {
         ESP_LOGW(TAG, "ask failed: %s", err ? err : "?");
+        ui_show_question(q);
         ui_show_answer(err ? err : "Something went wrong.");
         state = ST_IDLE;
         ui_set_mode(UI_IDLE, NULL);
-        free(q); free(a); free(err);
+        free(q); free(a); free(sp); free(err);
         return;
     }
 
-    // 3. speak
-    ui_show_answer(a);
+    // 3. show: Hindi and other scripts come back as a server-drawn image
+    uint8_t *img = NULL;
+    int iw = 0, ih = 0;
+    if (render && cloud_render(q, a, &img, &iw, &ih)) {
+        ui_show_rendered(img, iw, ih);
+    } else {
+        ui_show_question(q);
+        ui_show_answer(a);
+    }
+
+    // 4. speak
     state = ST_SPEAKING;
     stop_flag = false;
     ui_set_mode(UI_SPEAKING, NULL);
-    if (!cloud_speak(a, &stop_flag)) ui_set_mode(UI_IDLE, "Couldn't play the answer");
+    if (!cloud_speak(sp, &stop_flag)) ui_set_mode(UI_IDLE, "Couldn't play the answer");
     else ui_set_mode(UI_IDLE, NULL);
     state = ST_IDLE;
-    free(q); free(a); free(err);
+    free(q); free(a); free(sp); free(err);
 }
 
 static void assistant_task(void *arg)

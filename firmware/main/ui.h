@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 #include "esp_wifi_types.h"
 
 typedef enum {
@@ -21,6 +22,9 @@ void ui_set_mode(ui_mode_t mode, const char *hint);
 void ui_set_level(int percent);              // mic level while listening
 void ui_show_question(const char *text);
 void ui_show_answer(const char *text);
+// Shows a server-rendered RGB565 bitmap (Hindi etc.) instead of the text labels.
+// Takes ownership of rgb565 (heap_caps_malloc'd); it is freed when replaced.
+void ui_show_rendered(uint8_t *rgb565, int w, int h);
 void ui_set_brightness(int percent);
 
 // Overlays
