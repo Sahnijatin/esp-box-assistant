@@ -111,22 +111,23 @@ async function deviceAuth(req: Request) {
   return row;
 }
 
+async function latestVersion(): Promise<string | null> {
+  const latest = await must(db.from("firmware_releases").select("version").order("created_at", { ascending: false }).limit(1));
+  return latest[0]?.version ?? null;
+}
+
 async function deviceConfig(row: any, clearOtaFailed = false) {
   const s = await getSettings();
   const wifi = await must(db.from("wifi_networks").select("ssid,password,priority").order("priority", { ascending: false }));
   let update = null;
-  if (s.auto_update) {
-    let target = s.pinned_version as string | null;
-    if (!target) {
-      const latest = await must(db.from("firmware_releases").select("version").order("created_at", { ascending: false }).limit(1));
-      target = latest[0]?.version ?? null;
-    }
-    if (target && target !== row.fw_version && target !== row.ota_failed) {
-      const rel = await must(db.from("firmware_releases").select("*").eq("version", target).maybeSingle());
-      if (rel) {
-        const { data } = await db.storage.from("firmware").createSignedUrl(rel.ota_path, 900);
-        if (data?.signedUrl) update = { version: rel.version, url: data.signedUrl, size: rel.size };
-      }
+  // A box-specific "Update now" wins; otherwise follow the automatic update setting
+  let target: string | null = row.update_to ?? null;
+  if (!target && s.auto_update) target = s.pinned_version ?? await latestVersion();
+  if (target && target !== row.fw_version && target !== row.ota_failed) {
+    const rel = await must(db.from("firmware_releases").select("*").eq("version", target).maybeSingle());
+    if (rel) {
+      const { data } = await db.storage.from("firmware").createSignedUrl(rel.ota_path, 900);
+      if (data?.signedUrl) update = { version: rel.version, url: data.signedUrl, size: rel.size };
     }
   }
   return {
@@ -200,6 +201,10 @@ async function deviceHello(req: Request) {
     } else {
       telemetry.ota_retry = false;   // the box has forgotten it
     }
+  }
+  // "Update now" is done once the box runs that version, or has given up on it
+  if (row.update_to && (telemetry.fw_version === row.update_to || telemetry.ota_failed === row.update_to)) {
+    telemetry.update_to = null;
   }
   row = { ...row, ...telemetry };
   await must(db.from("devices").update(telemetry).eq("id", id));
@@ -351,7 +356,7 @@ async function admin(path: string, req: Request) {
         getSettings(),
         must(db.from("provider_keys").select("provider,last4,updated_at")),
         must(db.from("wifi_networks").select("*").order("priority", { ascending: false })),
-        must(db.from("devices").select("id,name,status,pair_code,fw_version,ota_failed,ota_retry,token_conflict,ip,ssid,rssi,free_heap,last_seen,created_at").order("created_at")),
+        must(db.from("devices").select("id,name,status,pair_code,fw_version,ota_failed,ota_retry,update_to,token_conflict,ip,ssid,rssi,free_heap,last_seen,created_at").order("created_at")),
         must(db.from("firmware_releases").select("*").order("created_at", { ascending: false }).limit(20)),
         must(db.from("conversations").select("*").order("created_at", { ascending: false }).limit(40)),
         must(db.from("build_logs").select("*").order("created_at", { ascending: false }).limit(5)),
@@ -425,6 +430,14 @@ async function admin(path: string, req: Request) {
       if (["active", "blocked"].includes(body.status)) upd.status = body.status;
       if (body.clear_ota_failed) Object.assign(upd, { ota_failed: null, ota_retry: true });
       if (body.clear_conflict) upd.token_conflict = null;
+      if (body.update_now) {
+        const v = await latestVersion();
+        if (!v) throw new HttpError(404, "No firmware has been built yet.");
+        const dev = await must(db.from("devices").select("ota_failed").eq("id", String(body.id)).maybeSingle());
+        upd.update_to = v;
+        // Asking again for a version that failed on this box means "try it again"
+        if (dev?.ota_failed === v) Object.assign(upd, { ota_failed: null, ota_retry: true });
+      }
       if (!Object.keys(upd).length) throw new HttpError(400, "nothing to change");
       await must(db.from("devices").update(upd).eq("id", String(body.id)));
       return json({ ok: true });

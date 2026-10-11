@@ -50,6 +50,7 @@ Edge Function changes are deployed separately (Supabase dashboard, CLI `supabase
 - **First boot without Wi-Fi:** Wi-Fi screen on the touchscreen + hotspot `ESP-Box-XXXX` (open `http://192.168.4.1`).
 - **Pairing:** shows a 6-digit code; enter it on the setup page under Boxes.
 - **Reflashed / erased box:** it makes a new device token, and the server won't accept it for a box that's already paired (so nobody can take over a box by copying its ID). The box says "Box was reset", the setup page flags it; remove the box there and it shows a new pairing code.
+- **Update one box now:** under Boxes, **Update to vX** installs the latest build on that box at its next check-in, even with automatic updates off.
 - **Failed update:** the box tries a build up to 3 times; a build that keeps failing or gets rolled back is skipped until the next build, or until you press Retry update on the setup page.
 - **Wi-Fi changes:** add networks on the setup page (pushed to boxes at check-in), on the touchscreen (tap the top bar), or through the hotspot when nothing connects.
 - **Asking:** tap the button, speak; it stops after about 1 s of silence (or tap again).
